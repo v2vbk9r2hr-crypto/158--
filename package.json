@@ -1,0 +1,14 @@
+{
+  "name": "taxi-dispatch-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^9.9.0",
+    "@supabase/supabase-js": "^2.106.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
