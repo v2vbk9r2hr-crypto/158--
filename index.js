@@ -707,13 +707,13 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
         return replyText(clientObj, event.replyToken, "目前沒有可取消的訂單");
       }
 
-      const orderSource = canceledOrder.source_name || source || "A";
+      const orderSource = canceledOrder.source_name || "A";
 
       if (canceledOrder.assigned_driver_line_id) {
         queueGroupMention(
           canceledOrder.assigned_driver_line_id,
           "取",
-          orderSource
+          "A"
         );
       }
 
@@ -819,7 +819,7 @@ async function handleCustomerChangeToReservation(
     return replyText(clientObj, event.replyToken, "找不到您目前的訂單");
   }
 
-  const orderSource = order.source_name || source || "A";
+  const orderSource = order.source_name || "A";
   const preference = await getCustomerPreference(event.source.userId);
 
   const paymentText =
@@ -851,7 +851,7 @@ async function handleCustomerChangeToReservation(
     source: orderSource
   });
 
-  pushAskDriverReservationChange(order, reservationTime, paymentText, orderSource);
+  pushAskDriverReservationChange(order, reservationTime, paymentText, "A");
 
   return replyText(clientObj, event.replyToken, "已詢問司機是否可更改，請稍等");
 }
@@ -866,7 +866,7 @@ async function handleReservationDriverReply(event, text, clientObj, source) {
   for (const [orderCode, pending] of pendingReservationChanges.entries()) {
     if (pending.driverLineId !== event.source.userId) continue;
 
-    const orderSource = pending.source || source || "A";
+    const orderSource = pending.source || "A";
 
     if (cleanText === "可") {
       pendingReservationChanges.delete(orderCode);
@@ -891,7 +891,7 @@ async function handleReservationDriverReply(event, text, clientObj, source) {
       queueCriticalText(
         DRIVER_GROUP_ID,
         `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`,
-        orderSource
+        "A"
       );
 
       return true;
@@ -913,7 +913,7 @@ async function handleDriverReport(event, text, clientObj, source) {
   const order = await getOrderByCodeAndAddress(orderCode, address);
   if (!order) return;
 
-  const orderSource = order.source_name || source || "A";
+  const orderSource = order.source_name || "A";
 
   if (order.status === "canceled") {
     return replyMention(clientObj, event.replyToken, event.source.userId, "X");
@@ -1084,7 +1084,7 @@ async function handleDriverReport(event, text, clientObj, source) {
           plate: winner.plate
         });
 
-        queueGroupMention(winner.driver_line_id, "噴", winnerSource);
+        queueGroupMention(winner.driver_line_id, "噴", "A");
 
         pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -1135,8 +1135,6 @@ async function refreshOpenOrders() {
         preference && preference.payment_method
           ? ` ${preference.payment_method}`
           : "";
-
-      const orderSource = order.source_name || "A";
 
       queueRefreshText(
         DRIVER_GROUP_ID,

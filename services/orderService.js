@@ -7,7 +7,7 @@ function makeOrderCode() {
   return `#${letter}${number}/`;
 }
 
-async function createOrder(address, customerLineId) {
+async function createOrder(address, customerLineId, source = "A") {
   const orderCode = makeOrderCode();
 
   const { data, error } = await supabase
@@ -18,7 +18,7 @@ async function createOrder(address, customerLineId) {
       customer_line_id: customerLineId,
       status: "open",
       decision_started: false,
-      last_refreshed_at: new Date().toISOString()
+      source_name: source
     })
     .select()
     .single();
