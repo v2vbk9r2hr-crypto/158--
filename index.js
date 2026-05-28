@@ -40,7 +40,9 @@ const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
-const REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+
+const REFRESH_INTERVAL_MS = 20 * 1000;
+const REFRESH_BATCH_SIZE = 3;
 
 const pendingReservationChanges = new Map();
 
@@ -82,10 +84,7 @@ function detectPaymentMethod(text) {
   for (const rule of rules) {
     for (const keyword of rule.keywords) {
       if (text.includes(keyword)) {
-        return {
-          keyword,
-          value: rule.value
-        };
+        return { keyword, value: rule.value };
       }
     }
   }
@@ -131,14 +130,7 @@ function queuePushMessage(to, message, options = {}) {
 }
 
 function queuePushText(to, text, options = {}) {
-  queuePushMessage(
-    to,
-    {
-      type: "text",
-      text
-    },
-    options
-  );
+  queuePushMessage(to, { type: "text", text }, options);
 }
 
 async function processPushQueue() {
@@ -356,7 +348,7 @@ async function checkDriverCurrentOrderTime({
 }
 
 app.get("/", (req, res) => {
-  res.send("Taxi Dispatch Bot Running - Safe Queue Mode + Refresh Orders");
+  res.send("Taxi Dispatch Bot Running");
 });
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -399,28 +391,15 @@ async function handleCustomerOrder(event, addressText) {
     const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
 
     if (!canceledOrder) {
-      return replyText(
-        client,
-        event.replyToken,
-        "目前沒有可取消的訂單"
-      );
+      return replyText(client, event.replyToken, "目前沒有可取消的訂單");
     }
 
-    return replyText(
-      client,
-      event.replyToken,
-      "已為您取消叫車"
-    );
+    return replyText(client, event.replyToken, "已為您取消叫車");
   }
 
   if (addressText === "取消付款設定") {
     await upsertCustomerPreference(customerLineId, "");
-
-    return replyText(
-      client,
-      event.replyToken,
-      "已取消您的固定付款方式"
-    );
+    return replyText(client, event.replyToken, "已取消您的固定付款方式");
   }
 
   const paymentDetected = detectPaymentMethod(addressText);
@@ -453,7 +432,6 @@ async function handleCustomerOrder(event, addressText) {
   }
 
   const order = await createOrder(addressText, customerLineId);
-
   const preference = await getCustomerPreference(customerLineId);
 
   const paymentText =
@@ -461,11 +439,7 @@ async function handleCustomerOrder(event, addressText) {
       ? ` ${preference.payment_method}`
       : "";
 
-  await replyText(
-    client,
-    event.replyToken,
-    "立即為您派車，請稍等"
-  );
+  await replyText(client, event.replyToken, "立即為您派車，請稍等");
 
   queuePushText(
     DRIVER_GROUP_ID,
@@ -524,11 +498,7 @@ async function handleCustomerChangeToReservation(event, text) {
 
   pushAskDriverReservationChange(order, reservationTime, paymentText);
 
-  return replyText(
-    client,
-    event.replyToken,
-    "已詢問司機是否可更改，請稍等"
-  );
+  return replyText(client, event.replyToken, "已詢問司機是否可更改，請稍等");
 }
 
 async function handleDriverReport(event, text) {
@@ -545,6 +515,10 @@ async function handleDriverReport(event, text) {
 
   const order = await getOrderByCodeAndAddress(orderCode, address);
   if (!order) return;
+
+  if (order.status === "canceled") {
+    return replyGroupMention(event.replyToken, event.source.userId, "X");
+  }
 
   if (parsed.type === "arrived") {
     await upsertDriverCurrentOrder({
@@ -628,12 +602,7 @@ async function handleDriverReport(event, text) {
       event.source.userId
     );
 
-    pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      minutes
-    );
-
+    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes);
     return;
   }
 
@@ -680,12 +649,7 @@ async function handleDriverReport(event, text) {
 
     await replyGroupMention(event.replyToken, event.source.userId, "噴");
 
-    pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      minutes
-    );
-
+    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes);
     return;
   }
 
@@ -729,9 +693,7 @@ async function handleReservationDriverReply(event, text) {
   }
 
   for (const [orderCode, pending] of pendingReservationChanges.entries()) {
-    if (pending.driverLineId !== event.source.userId) {
-      continue;
-    }
+    if (pending.driverLineId !== event.source.userId) continue;
 
     if (cleanText === "可") {
       pendingReservationChanges.delete(orderCode);
@@ -741,23 +703,14 @@ async function handleReservationDriverReply(event, text) {
         pending.reservationTime
       );
 
-      await replyGroupMention(
-        event.replyToken,
-        event.source.userId,
-        "可"
-      );
-
+      await replyGroupMention(event.replyToken, event.source.userId, "可");
       return true;
     }
 
     if (cleanText === "不同意") {
       pendingReservationChanges.delete(orderCode);
 
-      await replyGroupMention(
-        event.replyToken,
-        event.source.userId,
-        "X"
-      );
+      await replyGroupMention(event.replyToken, event.source.userId, "X");
 
       await resetOrderForReDispatch(pending.order.order_id);
 
@@ -780,7 +733,9 @@ async function refreshOpenOrders() {
 
     if (!orders || orders.length === 0) return;
 
-    for (const order of orders) {
+    const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
+
+    for (const order of refreshTargets) {
       const preference = await getCustomerPreference(order.customer_line_id);
 
       const paymentText =
@@ -795,6 +750,7 @@ async function refreshOpenOrders() {
       );
 
       await markOrderRefreshed(order.order_id);
+      await delay(1000);
     }
   } catch (err) {
     console.error("refreshOpenOrders error:", err);

@@ -152,9 +152,7 @@ async function getFirstDriverReport(orderId) {
 async function assignWinnerDriver(orderId) {
   const { data, error } = await supabase
     .from("orders")
-    .update({
-      decision_started: true
-    })
+    .update({ decision_started: true })
     .eq("order_id", orderId)
     .select()
     .single();
@@ -247,16 +245,14 @@ async function resetOrderForReDispatch(orderId) {
 }
 
 async function getOpenOrdersForRefresh() {
-  const threeMinutesAgo = new Date(
-    Date.now() - 3 * 60 * 1000
-  ).toISOString();
+  const refreshAgo = new Date(Date.now() - 3 * 60 * 1000).toISOString();
 
   const { data, error } = await supabase
     .from("orders")
     .select("*")
     .eq("status", "open")
     .eq("decision_started", false)
-    .or(`last_refreshed_at.is.null,last_refreshed_at.lt.${threeMinutesAgo}`)
+    .or(`last_refreshed_at.is.null,last_refreshed_at.lt.${refreshAgo}`)
     .order("created_at", { ascending: true });
 
   if (error) {
@@ -285,10 +281,7 @@ async function cancelLatestCustomerOrder(customerLineId) {
 
   if (!latestOrder) return null;
 
-  if (
-    latestOrder.status !== "open" &&
-    latestOrder.status !== "assigned"
-  ) {
+  if (latestOrder.status !== "open" && latestOrder.status !== "assigned") {
     return null;
   }
 
