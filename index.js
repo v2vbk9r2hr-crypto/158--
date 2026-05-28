@@ -1,6 +1,7 @@
 // ========================================
-// 多官方帳號 + 全功能完整版
+// 多官方帳號 + 全功能 + 防429 + 刷單 + 分隔線
 // 官方A + 官方B + 同一司機群
+// 完整商用版
 // ========================================
 
 require("dotenv").config();
@@ -22,8 +23,11 @@ const {
   overrideDriver
 } = require("./services/orderService");
 
-const { parseDriverMessage } =
-  require("./utils/parser");
+const {
+  parseDriverMessage
+} = require("./utils/parser");
+
+const app = express();
 
 // ========================================
 // 官方A
@@ -41,32 +45,45 @@ const clientA =
   new line.Client(configA);
 
 // ========================================
-// 官方B
+// 官方B（安全啟動版）
 // ========================================
 
-const configB = {
-  channelAccessToken:
-    process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
+let clientB = null;
 
-  channelSecret:
-    process.env.LINE_B_CHANNEL_SECRET
-};
+const hasLineB =
+  process.env.LINE_B_CHANNEL_ACCESS_TOKEN &&
+  process.env.LINE_B_CHANNEL_SECRET;
 
-const clientB =
-  new line.Client(configB);
+if (hasLineB) {
+
+  const configB = {
+    channelAccessToken:
+      process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
+
+    channelSecret:
+      process.env.LINE_B_CHANNEL_SECRET
+  };
+
+  clientB =
+    new line.Client(configB);
+
+  console.log(
+    "官方B 已啟用"
+  );
+
+} else {
+
+  console.log(
+    "官方B 尚未啟用"
+  );
+}
 
 // ========================================
-// APP
+// 基本設定
 // ========================================
-
-const app = express();
 
 const DRIVER_GROUP_ID =
   process.env.DRIVER_GROUP_ID;
-
-// ========================================
-// 系統開關
-// ========================================
 
 let BOT_ENABLED = true;
 
@@ -85,7 +102,7 @@ const refreshQueue = [];
 let isPushSending = false;
 
 // ========================================
-// 429
+// 429 防護
 // ========================================
 
 const PUSH_GAP_MS = 4000;
@@ -275,7 +292,7 @@ function removePaymentKeyword(
 }
 
 // ========================================
-// Queue Add
+// Queue
 // ========================================
 
 function addQueue(
@@ -318,28 +335,6 @@ function queueCriticalText(
       retry: 0,
       source,
       priority: "critical",
-
-      message: {
-        type: "text",
-        text
-      }
-    }
-  );
-}
-
-function queueNormalText(
-  to,
-  text,
-  source = "A"
-) {
-
-  addQueue(
-    normalQueue,
-    {
-      to,
-      retry: 0,
-      source,
-      priority: "normal",
 
       message: {
         type: "text",
@@ -422,9 +417,9 @@ async function processPushQueue() {
 
     try {
 
-      // =========================
+      // ====================================
       // 官方A
-      // =========================
+      // ====================================
 
       if (
         job.source === "A"
@@ -437,9 +432,13 @@ async function processPushQueue() {
 
       } else {
 
-        // =========================
+        // ====================================
         // 官方B
-        // =========================
+        // ====================================
+
+        if (!clientB) {
+          continue;
+        }
 
         await clientB.pushMessage(
           job.to,
@@ -519,30 +518,9 @@ async function processPushQueue() {
           job.retry
         );
 
-        if (
-          job.priority ===
-          "critical"
-        ) {
-
-          criticalQueue.unshift(
-            job
-          );
-
-        } else if (
-          job.priority ===
-          "normal"
-        ) {
-
-          normalQueue.unshift(
-            job
-          );
-
-        } else {
-
-          refreshQueue.unshift(
-            job
-          );
-        }
+        criticalQueue.unshift(
+          job
+        );
 
         continue;
       }
@@ -666,34 +644,45 @@ app.post(
 // 官方B webhook
 // ========================================
 
-app.post(
-  "/webhook-b",
+if (hasLineB) {
 
-  line.middleware(configB),
+  const configB = {
+    channelAccessToken:
+      process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
 
-  async (req, res) => {
+    channelSecret:
+      process.env.LINE_B_CHANNEL_SECRET
+  };
 
-    res.status(200).end();
+  app.post(
+    "/webhook-b",
 
-    const events =
-      req.body.events || [];
+    line.middleware(configB),
 
-    for (const event of events) {
+    async (req, res) => {
 
-      handleEvent(
-        event,
-        clientB,
-        "B"
-      ).catch(err => {
+      res.status(200).end();
 
-        console.error(
-          "B error:",
-          err
-        );
-      });
+      const events =
+        req.body.events || [];
+
+      for (const event of events) {
+
+        handleEvent(
+          event,
+          clientB,
+          "B"
+        ).catch(err => {
+
+          console.error(
+            "B error:",
+            err
+          );
+        });
+      }
     }
-  }
-);
+  );
+}
 
 // ========================================
 // Event
@@ -1225,7 +1214,7 @@ async function refreshOpenOrders() {
 }
 
 // ========================================
-// Auto Resume
+// 自動恢復
 // ========================================
 
 setInterval(() => {
