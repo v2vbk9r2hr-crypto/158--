@@ -24,76 +24,190 @@ const {
   setBotSetting
 } = require("./services/orderService");
 
-const { replyText } = require("./services/lineService");
 const { parseDriverMessage } = require("./utils/parser");
 const { getDrivingMinutes } = require("./services/googleDistanceService");
 
 const app = express();
 
 const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET
+  channelAccessToken:
+    process.env.LINE_CHANNEL_ACCESS_TOKEN,
+
+  channelSecret:
+    process.env.LINE_CHANNEL_SECRET
 };
 
-const client = new line.Client(config);
-const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
+const client =
+  new line.Client(config);
+
+const DRIVER_GROUP_ID =
+  process.env.DRIVER_GROUP_ID;
+
+// =========================
+// 系統開關
+// =========================
 
 let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
+
+// =========================
+// 派單規則
+// =========================
 
 const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
-const REFRESH_INTERVAL_MS = 20 * 1000;
-const REFRESH_BATCH_SIZE = 3;
+// =========================
+// 429 防護
+// =========================
 
-const pendingReservationChanges = new Map();
+const PUSH_GAP_MS = 4000;
+const MIN_PUSH_GAP_MS = 3000;
+const MAX_PUSH_GAP_MS = 15000;
 
-const processingOrders = new Set();
-const refreshingOrders = new Set();
-const decidingOrders = new Set();
+const REFRESH_INTERVAL_MS =
+  45 * 1000;
 
-const pushQueue = [];
-let isPushSending = false;
+const REFRESH_BATCH_SIZE = 2;
 
-const PUSH_GAP_MS = 2500;
-const MIN_PUSH_GAP_MS = 1800;
-const MAX_PUSH_GAP_MS = 8000;
-const MERGE_WINDOW_MS = 1500;
+const MAX_QUEUE_SIZE = 300;
+
 const MAX_RETRY = 5;
 
-let currentPushGapMs = PUSH_GAP_MS;
+// =========================
+// Queue 分流
+// =========================
+
+const criticalQueue = [];
+const refreshQueue = [];
+
+let isPushSending = false;
+
+let currentPushGapMs =
+  PUSH_GAP_MS;
+
+// =========================
+// 熔斷保護
+// =========================
+
+let circuitBreaker = false;
+
+let tooMany429Count = 0;
+
+let pauseRefreshUntil = 0;
+
+// =========================
+// 冷卻保護
+// =========================
+
+const customerCooldown =
+  new Map();
+
+const driverCooldown =
+  new Map();
+
+// =========================
+// 防重複
+// =========================
+
+const processingOrders =
+  new Set();
+
+const refreshingOrders =
+  new Set();
+
+const decidingOrders =
+  new Set();
+
+const pendingReservationChanges =
+  new Map();
+
+// =========================
+// delay
+// =========================
 
 function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
+  );
 }
 
-function getArrivalTimeMs(reportTime, minutes) {
-  return new Date(reportTime).getTime() + Number(minutes) * 60 * 1000;
-}
+// =========================
+// Error Helpers
+// =========================
 
 function getErrorStatus(err) {
-  return err?.statusCode || err?.originalError?.response?.status;
+
+  return (
+    err?.statusCode ||
+    err?.originalError?.response?.status
+  );
 }
 
 function getErrorData(err) {
-  return err?.originalError?.response?.data || err.message;
+
+  return (
+    err?.originalError?.response
+      ?.data ||
+    err.message
+  );
 }
 
+// =========================
+// Payment Detect
+// =========================
+
 function detectPaymentMethod(text) {
+
   const rules = [
-    { keywords: ["客下街口", "下街口", "街口"], value: "客下街口" },
-    { keywords: ["客下轉帳"], value: "客下轉帳" },
-    { keywords: ["轉帳"], value: "轉帳" },
-    { keywords: ["現金"], value: "現金" }
+    {
+      keywords: [
+        "客下街口",
+        "下街口",
+        "街口"
+      ],
+      value: "客下街口"
+    },
+
+    {
+      keywords: [
+        "客下轉帳"
+      ],
+      value: "客下轉帳"
+    },
+
+    {
+      keywords: [
+        "轉帳"
+      ],
+      value: "轉帳"
+    },
+
+    {
+      keywords: [
+        "現金"
+      ],
+      value: "現金"
+    }
   ];
 
   for (const rule of rules) {
-    for (const keyword of rule.keywords) {
-      if (text.includes(keyword)) {
-        return { keyword, value: rule.value };
+
+    for (
+      const keyword of rule.keywords
+    ) {
+
+      if (
+        text.includes(keyword)
+      ) {
+
+        return {
+          keyword,
+          value: rule.value
+        };
       }
     }
   }
@@ -101,111 +215,308 @@ function detectPaymentMethod(text) {
   return null;
 }
 
-function removePaymentKeyword(text, keyword) {
-  return text.replace(keyword, "").replace(/\s+/g, " ").trim();
+function removePaymentKeyword(
+  text,
+  keyword
+) {
+
+  return text
+    .replace(keyword, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function queuePushMessage(to, message, options = {}) {
-  if (!to || !message) return;
+// =========================
+// Queue
+// =========================
 
-  const now = Date.now();
+function addCriticalQueue(job) {
+
+  const totalQueueSize =
+    criticalQueue.length +
+    refreshQueue.length;
 
   if (
-    options.merge !== false &&
-    message.type === "text" &&
-    pushQueue.length > 0
+    totalQueueSize >=
+    MAX_QUEUE_SIZE
   ) {
-    const lastJob = pushQueue[pushQueue.length - 1];
 
-    if (
-      lastJob &&
-      lastJob.to === to &&
-      lastJob.message.type === "text" &&
-      now - lastJob.createdAt <= MERGE_WINDOW_MS
-    ) {
-      lastJob.message.text += "\n" + message.text;
-      return;
-    }
+    console.error(
+      "QUEUE FULL"
+    );
+
+    return;
   }
 
-  pushQueue.push({
-    to,
-    message,
-    retry: 0,
-    createdAt: now
-  });
+  criticalQueue.push(job);
 
   processPushQueue();
 }
 
-function queuePushText(to, text, options = {}) {
-  queuePushMessage(to, { type: "text", text }, options);
+function addRefreshQueue(job) {
+
+  if (circuitBreaker) {
+    return;
+  }
+
+  if (
+    Date.now() <
+    pauseRefreshUntil
+  ) {
+    return;
+  }
+
+  const totalQueueSize =
+    criticalQueue.length +
+    refreshQueue.length;
+
+  if (
+    totalQueueSize >=
+    MAX_QUEUE_SIZE
+  ) {
+
+    console.error(
+      "REFRESH DROP"
+    );
+
+    return;
+  }
+
+  refreshQueue.push(job);
+
+  processPushQueue();
 }
 
+// =========================
+// Push Processor
+// =========================
+
 async function processPushQueue() {
+
   if (isPushSending) return;
 
   isPushSending = true;
 
-  while (pushQueue.length > 0) {
-    const job = pushQueue.shift();
+  while (
+    criticalQueue.length > 0 ||
+    refreshQueue.length > 0
+  ) {
+
+    let job;
+
+    if (
+      criticalQueue.length > 0
+    ) {
+
+      job =
+        criticalQueue.shift();
+
+    } else {
+
+      job =
+        refreshQueue.shift();
+    }
 
     try {
-      await client.pushMessage(job.to, job.message);
 
-      console.log("PUSH SEND:", job.message.text || job.message.type);
-
-      currentPushGapMs = Math.max(
-        MIN_PUSH_GAP_MS,
-        currentPushGapMs - 300
+      await client.pushMessage(
+        job.to,
+        job.message
       );
 
-      await delay(currentPushGapMs);
-    } catch (err) {
-      const status = getErrorStatus(err);
-      const data = getErrorData(err);
+      console.log(
+        "PUSH SEND:",
+        job.message.text
+      );
 
-      console.error("PUSH ERROR:", data);
+      currentPushGapMs =
+        Math.max(
+          MIN_PUSH_GAP_MS,
+          currentPushGapMs - 300
+        );
+
+      await delay(
+        currentPushGapMs
+      );
+
+    } catch (err) {
+
+      const status =
+        getErrorStatus(err);
+
+      const data =
+        getErrorData(err);
+
+      console.error(
+        "PUSH ERROR:",
+        data
+      );
 
       if (
         data &&
-        typeof data === "object" &&
-        data.message === "You have reached your monthly limit."
+        typeof data ===
+          "object" &&
+        data.message ===
+          "You have reached your monthly limit."
       ) {
-        console.error("LINE 月額度已用完，停止 pushMessage");
-        pushQueue.length = 0;
+
+        console.error(
+          "LINE 月額度已用完"
+        );
+
+        criticalQueue.length = 0;
+        refreshQueue.length = 0;
+
         break;
       }
 
-      if (status === 429 && job.retry < MAX_RETRY) {
+      if (
+        status === 429 &&
+        job.retry < MAX_RETRY
+      ) {
+
         job.retry += 1;
 
-        currentPushGapMs = Math.min(
-          MAX_PUSH_GAP_MS,
-          currentPushGapMs + 1500
+        tooMany429Count++;
+
+        pauseRefreshUntil =
+          Date.now() +
+          5 * 60 * 1000;
+
+        REFRESH_ENABLED =
+          false;
+
+        console.log(
+          "429 停刷單5分鐘"
         );
 
-        const retryDelay = currentPushGapMs * job.retry;
+        if (
+          tooMany429Count >= 5
+        ) {
 
-        console.log(`429 限流，${retryDelay}ms 後重試`);
+          circuitBreaker =
+            true;
 
-        await delay(retryDelay);
-        pushQueue.unshift(job);
+          console.log(
+            "熔斷保護啟動"
+          );
+
+          setTimeout(() => {
+
+            circuitBreaker =
+              false;
+
+            tooMany429Count = 0;
+
+            REFRESH_ENABLED =
+              true;
+
+            console.log(
+              "熔斷解除"
+            );
+
+          }, 10 * 60 * 1000);
+        }
+
+        currentPushGapMs =
+          Math.min(
+            MAX_PUSH_GAP_MS,
+            currentPushGapMs + 1500
+          );
+
+        const retryDelay =
+          currentPushGapMs *
+          job.retry;
+
+        console.log(
+          `429 ${retryDelay}ms 後重試`
+        );
+
+        await delay(
+          retryDelay
+        );
+
+        if (
+          job.priority ===
+          "critical"
+        ) {
+
+          criticalQueue.unshift(
+            job
+          );
+
+        } else {
+
+          refreshQueue.unshift(
+            job
+          );
+        }
+
         continue;
       }
 
-      await delay(currentPushGapMs);
+      await delay(
+        currentPushGapMs
+      );
     }
   }
 
   isPushSending = false;
 }
 
-async function replyGroupMention(replyToken, userId, text) {
-  try {
-    return client.replyMessage(replyToken, {
+// =========================
+// Queue Text
+// =========================
+
+function queueCriticalText(
+  to,
+  text
+) {
+
+  addCriticalQueue({
+    to,
+    priority: "critical",
+    retry: 0,
+    message: {
+      type: "text",
+      text
+    }
+  });
+}
+
+function queueRefreshText(
+  to,
+  text
+) {
+
+  addRefreshQueue({
+    to,
+    priority: "refresh",
+    retry: 0,
+    message: {
+      type: "text",
+      text
+    }
+  });
+}
+
+// =========================
+// Mention
+// =========================
+
+async function replyMention(
+  replyToken,
+  userId,
+  text
+) {
+
+  return client.replyMessage(
+    replyToken,
+    {
       type: "textV2",
-      text: "{driver} " + text,
+      text:
+        "{driver} " + text,
+
       substitution: {
         driver: {
           type: "mention",
@@ -215,708 +526,834 @@ async function replyGroupMention(replyToken, userId, text) {
           }
         }
       }
-    });
-  } catch (err) {
-    console.error("replyGroupMention error:", getErrorData(err));
-  }
-}
-
-async function replyTwoGroupMentions(replyToken, oldUserId, newUserId) {
-  try {
-    return client.replyMessage(replyToken, {
-      type: "textV2",
-      text: "{oldDriver} X\n{newDriver} 噴",
-      substitution: {
-        oldDriver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: oldUserId
-          }
-        },
-        newDriver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: newUserId
-          }
-        }
-      }
-    });
-  } catch (err) {
-    console.error("replyTwoGroupMentions error:", getErrorData(err));
-  }
-}
-
-function pushGroupWinnerMention(driverLineId) {
-  queuePushMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text: "{driver} 噴",
-      substitution: {
-        driver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: driverLineId
-          }
-        }
-      }
-    },
-    { merge: false }
+    }
   );
 }
 
-function pushGroupCancelMention(driverLineId) {
-  queuePushMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text: "{driver} 取",
-      substitution: {
-        driver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: driverLineId
-          }
-        }
-      }
-    },
-    { merge: false }
-  );
-}
+// =========================
+// Cooldown
+// =========================
 
-function pushCustomerDispatch(customerLineId, plate, minutes) {
-  queuePushText(
-    customerLineId,
-    `司機已出發\n車牌：${plate}\n約 ${minutes} 分鐘到`,
-    { merge: false }
-  );
-}
+function checkCustomerCooldown(
+  customerLineId
+) {
 
-function pushCustomerArrived(customerLineId, plate) {
-  queuePushText(
-    customerLineId,
-    `車輛已抵達\n車牌：${plate}`,
-    { merge: false }
-  );
-}
+  const last =
+    customerCooldown.get(
+      customerLineId
+    );
 
-function pushCustomerReservationChanged(customerLineId, reservationTime) {
-  queuePushText(
-    customerLineId,
-    `已為您更改為預約單\n預約時間：${reservationTime}`,
-    { merge: false }
-  );
-}
+  if (
+    last &&
+    Date.now() - last < 5000
+  ) {
 
-function pushAskDriverReservationChange(order, reservationTime, paymentText = "") {
-  queuePushMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text:
-        `${order.order_code} ${reservationTime} ${order.address}${paymentText}\n` +
-        "{driver} 可不可更改",
-      substitution: {
-        driver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: order.assigned_driver_line_id
-          }
-        }
-      }
-    },
-    { merge: false }
-  );
-}
-
-async function rememberDriverOrder({
-  driverLineId,
-  order,
-  orderCode,
-  address,
-  plate,
-  status = "assigned"
-}) {
-  return upsertDriverCurrentOrder({
-    driverLineId,
-    orderId: order.order_id,
-    orderCode,
-    address,
-    plate,
-    status
-  });
-}
-
-async function checkDriverCurrentOrderTime({
-  driverLineId,
-  replyToken,
-  currentOrder,
-  newAddress,
-  reportMinutes
-}) {
-  if (!currentOrder || !currentOrder.address) return true;
-
-  const googleMinutes = await getDrivingMinutes(
-    currentOrder.address,
-    newAddress
-  );
-
-  if (googleMinutes === null) return true;
-
-  if (Number(reportMinutes) < googleMinutes - GOOGLE_TOLERANCE_MINUTES) {
-    await replyGroupMention(replyToken, driverLineId, "X");
     return false;
   }
+
+  customerCooldown.set(
+    customerLineId,
+    Date.now()
+  );
 
   return true;
 }
 
-async function handleBotControl(event, text) {
-  if (event.source.type !== "group") return false;
+function checkDriverCooldown(
+  driverLineId
+) {
 
-  if (text === "停止機器人運作" || text === "停止") {
+  const last =
+    driverCooldown.get(
+      driverLineId
+    );
+
+  if (
+    last &&
+    Date.now() - last < 3000
+  ) {
+
+    return false;
+  }
+
+  driverCooldown.set(
+    driverLineId,
+    Date.now()
+  );
+
+  return true;
+}
+
+// =========================
+// Bot Control
+// =========================
+
+async function handleBotControl(
+  event,
+  text
+) {
+
+  if (
+    event.source.type !==
+    "group"
+  ) {
+    return false;
+  }
+
+  if (
+    text ===
+      "停止機器人運作" ||
+    text === "停止"
+  ) {
+
     BOT_ENABLED = false;
 
-    await setBotSetting("bot_enabled", "false");
+    await setBotSetting(
+      "bot_enabled",
+      "false"
+    );
 
-    pushQueue.length = 0;
     processingOrders.clear();
     refreshingOrders.clear();
     decidingOrders.clear();
-    pendingReservationChanges.clear();
 
-    await replyText(client, event.replyToken, "機器人已停止運作");
+    criticalQueue.length = 0;
+    refreshQueue.length = 0;
+
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "機器人已停止運作"
+      }
+    );
+
     return true;
   }
 
-  if (text === "開始機器人運作" || text === "開始") {
+  if (
+    text ===
+      "開始機器人運作" ||
+    text === "開始"
+  ) {
+
     BOT_ENABLED = true;
 
-    await setBotSetting("bot_enabled", "true");
+    await setBotSetting(
+      "bot_enabled",
+      "true"
+    );
 
-    await replyText(client, event.replyToken, "機器人已開始運作");
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "機器人已開始運作"
+      }
+    );
+
     return true;
   }
 
   if (text === "停止刷單") {
+
     REFRESH_ENABLED = false;
 
-    await setBotSetting("refresh_enabled", "false");
+    await setBotSetting(
+      "refresh_enabled",
+      "false"
+    );
 
-    refreshingOrders.clear();
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "刷單功能已停止"
+      }
+    );
 
-    await replyText(client, event.replyToken, "刷單功能已停止");
     return true;
   }
 
   if (text === "開始刷單") {
+
     REFRESH_ENABLED = true;
 
-    await setBotSetting("refresh_enabled", "true");
+    await setBotSetting(
+      "refresh_enabled",
+      "true"
+    );
 
-    await replyText(client, event.replyToken, "刷單功能已開始");
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "刷單功能已開始"
+      }
+    );
+
     return true;
   }
 
   return false;
 }
 
-app.get("/", (req, res) => {
-  res.send(
-    `Taxi Dispatch Bot Running - BOT_ENABLED=${BOT_ENABLED}, REFRESH_ENABLED=${REFRESH_ENABLED}`
-  );
-});
+// =========================
+// Webhook
+// =========================
 
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  res.status(200).end();
+app.post(
+  "/webhook",
+  line.middleware(config),
 
-  const events = req.body.events || [];
+  async (req, res) => {
 
-  for (const event of events) {
-    handleEvent(event).catch(err => {
-      console.error("handleEvent async error:", err);
-    });
+    res.status(200).end();
+
+    const events =
+      req.body.events || [];
+
+    for (const event of events) {
+
+      handleEvent(event).catch(
+        err => {
+
+          console.error(
+            "handleEvent error:",
+            err
+          );
+        }
+      );
+    }
   }
-});
+);
 
-async function handleEvent(event) {
-  console.log("SOURCE:", event.source);
+// =========================
+// Event
+// =========================
 
-  if (event.type !== "message") return;
-  if (event.message.type !== "text") return;
+async function handleEvent(
+  event
+) {
 
-  const text = event.message.text.trim();
-
-  const controlled = await handleBotControl(event, text);
-  if (controlled) return;
-
-  if (!BOT_ENABLED) return;
-
-  if (event.source.type === "user") {
-    return handleCustomerOrder(event, text);
+  if (
+    event.type !==
+    "message"
+  ) {
+    return;
   }
 
-  if (event.source.type === "group") {
-    return handleDriverReport(event, text);
+  if (
+    event.message.type !==
+    "text"
+  ) {
+    return;
+  }
+
+  const text =
+    event.message.text.trim();
+
+  const controlled =
+    await handleBotControl(
+      event,
+      text
+    );
+
+  if (controlled) {
+    return;
+  }
+
+  if (!BOT_ENABLED) {
+    return;
+  }
+
+  if (
+    event.source.type ===
+    "user"
+  ) {
+
+    return handleCustomerOrder(
+      event,
+      text
+    );
+  }
+
+  if (
+    event.source.type ===
+    "group"
+  ) {
+
+    return handleDriverReport(
+      event,
+      text
+    );
   }
 }
 
-async function handleCustomerOrder(event, addressText) {
-  const customerLineId = event.source.userId;
+// =========================
+// Customer Order
+// =========================
+
+async function handleCustomerOrder(
+  event,
+  addressText
+) {
+
+  const customerLineId =
+    event.source.userId;
+
+  if (
+    !checkCustomerCooldown(
+      customerLineId
+    )
+  ) {
+
+    return client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "請稍後再試"
+      }
+    );
+  }
 
   try {
-    if (processingOrders.has(customerLineId)) {
-      return replyText(client, event.replyToken, "系統處理中，請稍等");
-    }
-
-    processingOrders.add(customerLineId);
 
     if (
-      addressText === "取消叫車" ||
-      addressText === "取消" ||
-      addressText === "取" ||
-      addressText === "不用車"
+      processingOrders.has(
+        customerLineId
+      )
     ) {
-      const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
 
-      processingOrders.delete(customerLineId);
-
-      if (!canceledOrder) {
-        return replyText(client, event.replyToken, "目前沒有可取消的訂單");
-      }
-
-      if (canceledOrder.assigned_driver_line_id) {
-        pushGroupCancelMention(canceledOrder.assigned_driver_line_id);
-      }
-
-      return replyText(client, event.replyToken, "已為您取消叫車");
+      return;
     }
 
-    if (addressText === "取消付款設定") {
-      await upsertCustomerPreference(customerLineId, "");
+    processingOrders.add(
+      customerLineId
+    );
 
-      processingOrders.delete(customerLineId);
+    // =========================
+    // 取消
+    // =========================
 
-      return replyText(client, event.replyToken, "已取消您的固定付款方式");
-    }
+    if (
+      addressText ===
+        "取消" ||
+      addressText ===
+        "取消叫車" ||
+      addressText ===
+        "取" ||
+      addressText ===
+        "不用車"
+    ) {
 
-    const paymentDetected = detectPaymentMethod(addressText);
+      const canceledOrder =
+        await cancelLatestCustomerOrder(
+          customerLineId
+        );
 
-    if (paymentDetected) {
-      await upsertCustomerPreference(customerLineId, paymentDetected.value);
-
-      const cleanedAddress = removePaymentKeyword(
-        addressText,
-        paymentDetected.keyword
+      processingOrders.delete(
+        customerLineId
       );
 
-      if (cleanedAddress.length < 3) {
-        processingOrders.delete(customerLineId);
+      if (!canceledOrder) {
 
-        return replyText(
-          client,
+        return client.replyMessage(
           event.replyToken,
-          `已記住您的付款方式：${paymentDetected.value}`
+          {
+            type: "text",
+            text:
+              "目前沒有可取消的訂單"
+          }
         );
       }
 
-      addressText = cleanedAddress;
+      if (
+        canceledOrder.assigned_driver_line_id
+      ) {
+
+        queueCriticalText(
+          DRIVER_GROUP_ID,
+          `@司機 取`
+        );
+      }
+
+      return client.replyMessage(
+        event.replyToken,
+        {
+          type: "text",
+          text:
+            "已取消叫車"
+        }
+      );
     }
 
-    if (addressText.startsWith("改預約")) {
-      processingOrders.delete(customerLineId);
+    // =========================
+    // 付款方式
+    // =========================
 
-      return handleCustomerChangeToReservation(event, addressText);
+    const paymentDetected =
+      detectPaymentMethod(
+        addressText
+      );
+
+    if (paymentDetected) {
+
+      await upsertCustomerPreference(
+        customerLineId,
+        paymentDetected.value
+      );
+
+      addressText =
+        removePaymentKeyword(
+          addressText,
+          paymentDetected.keyword
+        );
     }
 
-    if (addressText.length < 3) {
-      processingOrders.delete(customerLineId);
+    // =========================
+    // 建立訂單
+    // =========================
 
-      return replyText(client, event.replyToken, "請輸入完整地址");
-    }
+    const order =
+      await createOrder(
+        addressText,
+        customerLineId
+      );
 
-    const order = await createOrder(addressText, customerLineId);
-
-    const preference = await getCustomerPreference(customerLineId);
+    const preference =
+      await getCustomerPreference(
+        customerLineId
+      );
 
     const paymentText =
-      preference && preference.payment_method
+      preference &&
+      preference.payment_method
         ? ` ${preference.payment_method}`
         : "";
 
-    processingOrders.delete(customerLineId);
+    processingOrders.delete(
+      customerLineId
+    );
 
-    await replyText(client, event.replyToken, "立即為您派車，請稍等");
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "立即為您派車"
+      }
+    );
 
-    queuePushText(
+    queueCriticalText(
       DRIVER_GROUP_ID,
       `${order.order_code} ${order.address}${paymentText}`
     );
+
   } catch (err) {
-    processingOrders.delete(customerLineId);
 
-    console.error("handleCustomerOrder error:", err);
+    processingOrders.delete(
+      customerLineId
+    );
 
-    return replyText(client, event.replyToken, "系統忙碌中");
+    console.error(
+      "handleCustomerOrder error:",
+      err
+    );
   }
 }
 
-async function handleCustomerChangeToReservation(event, text) {
-  const parts = text.split(/\s+/);
+// =========================
+// Driver Report
+// =========================
 
-  if (parts.length < 2) {
-    return replyText(
-      client,
-      event.replyToken,
-      "格式錯誤\n例如：改預約 18:30"
-    );
-  }
-
-  const reservationTime = parts[1];
-
-  const order = await getLatestCustomerOrder(event.source.userId);
-
-  if (!order) {
-    return replyText(client, event.replyToken, "找不到您目前的訂單");
-  }
-
-  const preference = await getCustomerPreference(event.source.userId);
-
-  const paymentText =
-    preference && preference.payment_method
-      ? ` ${preference.payment_method}`
-      : "";
-
-  if (order.status !== "assigned" || !order.assigned_driver_line_id) {
-    queuePushText(
-      DRIVER_GROUP_ID,
-      `${order.order_code} ${reservationTime} ${order.address}${paymentText}`,
-      { merge: false }
-    );
-
-    return replyText(
-      client,
-      event.replyToken,
-      `已改成預約單\n預約時間：${reservationTime}`
-    );
-  }
-
-  pendingReservationChanges.set(order.order_code, {
-    order,
-    reservationTime,
-    address: order.address,
-    paymentText,
-    customerLineId: order.customer_line_id,
-    driverLineId: order.assigned_driver_line_id
-  });
-
-  pushAskDriverReservationChange(order, reservationTime, paymentText);
-
-  return replyText(client, event.replyToken, "已詢問司機是否可更改，請稍等");
-}
-
-async function handleDriverReport(event, text) {
-  const reservationReply = await handleReservationDriverReply(event, text);
-  if (reservationReply) return;
-
-  const parsed = parseDriverMessage(text);
-
-  if (!parsed) {
-    return replyGroupMention(event.replyToken, event.source.userId, "X");
-  }
-
-  const { orderCode, address, plate, minutes } = parsed;
-
-  const order = await getOrderByCodeAndAddress(orderCode, address);
-  if (!order) return;
-
-  if (order.status === "canceled") {
-    return replyGroupMention(event.replyToken, event.source.userId, "X");
-  }
-
-  if (parsed.type === "arrived") {
-    await upsertDriverCurrentOrder({
-      driverLineId: event.source.userId,
-      orderId: order.order_id,
-      orderCode,
-      address,
-      plate,
-      status: "arrived"
-    });
-
-    pushCustomerArrived(order.customer_line_id, plate);
-    return;
-  }
-
-  if (parsed.type === "customer_on") {
-    await upsertDriverCurrentOrder({
-      driverLineId: event.source.userId,
-      orderId: order.order_id,
-      orderCode,
-      address,
-      plate,
-      status: "customer_on"
-    });
-
-    return;
-  }
-
-  if (parsed.type !== "report") return;
-
-  const currentDriverOrder = await getDriverCurrentOrder(event.source.userId);
+async function handleDriverReport(
+  event,
+  text
+) {
 
   if (
-    currentDriverOrder &&
-    currentDriverOrder.order_id !== order.order_id
-  ) {
-    const ok = await checkDriverCurrentOrderTime({
-      driverLineId: event.source.userId,
-      replyToken: event.replyToken,
-      currentOrder: currentDriverOrder,
-      newAddress: address,
-      reportMinutes: minutes
-    });
-
-    if (!ok) return;
-  }
-
-  if (order.status === "assigned") {
-    const oldArrival = getArrivalTimeMs(
-      order.assigned_at,
-      order.assigned_minutes
-    );
-
-    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
-    const diffMinutes = (oldArrival - newArrival) / 1000 / 60;
-
-    if (diffMinutes < OVERRIDE_DIFF_MINUTES) {
-      return replyGroupMention(event.replyToken, event.source.userId, "X");
-    }
-
-    const oldDriverLineId = order.assigned_driver_line_id;
-
-    const updatedOrder = await overrideDriver({
-      order,
-      driverLineId: event.source.userId,
-      plate,
-      minutes
-    });
-
-    await rememberDriverOrder({
-      driverLineId: event.source.userId,
-      order: updatedOrder,
-      orderCode,
-      address,
-      plate
-    });
-
-    await replyTwoGroupMentions(
-      event.replyToken,
-      oldDriverLineId,
+    !checkDriverCooldown(
       event.source.userId
-    );
+    )
+  ) {
 
-    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes);
     return;
   }
 
-  const firstReport = await getFirstDriverReport(order.order_id);
+  const parsed =
+    parseDriverMessage(text);
 
-  if (firstReport) {
-    const firstArrival = getArrivalTimeMs(
-      firstReport.created_at,
-      firstReport.minutes
+  if (!parsed) {
+    return;
+  }
+
+  const {
+    orderCode,
+    address,
+    plate,
+    minutes
+  } = parsed;
+
+  const order =
+    await getOrderByCodeAndAddress(
+      orderCode,
+      address
     );
 
-    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
-    const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
-
-    if (diffMinutes < COMPETE_DIFF_MINUTES) {
-      return replyGroupMention(event.replyToken, event.source.userId, "X");
-    }
+  if (!order) {
+    return;
   }
+
+  if (
+    order.status ===
+    "canceled"
+  ) {
+
+    return replyMention(
+      event.replyToken,
+      event.source.userId,
+      "X"
+    );
+  }
+
+  // =========================
+  // 已有司機
+  // =========================
+
+  if (
+    order.status ===
+    "assigned"
+  ) {
+
+    const oldArrival =
+      new Date(
+        order.assigned_at
+      ).getTime() +
+      Number(
+        order.assigned_minutes
+      ) *
+        60 *
+        1000;
+
+    const newArrival =
+      Date.now() +
+      Number(minutes) *
+        60 *
+        1000;
+
+    const diffMinutes =
+      (oldArrival -
+        newArrival) /
+      1000 /
+      60;
+
+    if (
+      diffMinutes <
+      OVERRIDE_DIFF_MINUTES
+    ) {
+
+      return replyMention(
+        event.replyToken,
+        event.source.userId,
+        "X"
+      );
+    }
+
+    const updatedOrder =
+      await overrideDriver({
+        order,
+        driverLineId:
+          event.source.userId,
+        plate,
+        minutes
+      });
+
+    queueCriticalText(
+      DRIVER_GROUP_ID,
+      "@司機 噴"
+    );
+
+    queueCriticalText(
+      updatedOrder.customer_line_id,
+      `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
+    );
+
+    return;
+  }
+
+  // =========================
+  // 新增回報
+  // =========================
 
   await addDriverReport({
     orderId: order.order_id,
     orderCode,
     address,
-    driverLineId: event.source.userId,
+    driverLineId:
+      event.source.userId,
     plate,
     minutes
   });
 
-  if (Number(minutes) <= INSTANT_WIN_MINUTES) {
-    const updatedOrder = await overrideDriver({
-      order,
-      driverLineId: event.source.userId,
-      plate,
-      minutes
-    });
+  // =========================
+  // 5分鐘直接中選
+  // =========================
 
-    await rememberDriverOrder({
-      driverLineId: event.source.userId,
-      order: updatedOrder,
-      orderCode,
-      address,
-      plate
-    });
+  if (
+    Number(minutes) <=
+    INSTANT_WIN_MINUTES
+  ) {
 
-    await replyGroupMention(event.replyToken, event.source.userId, "噴");
+    const updatedOrder =
+      await overrideDriver({
+        order,
+        driverLineId:
+          event.source.userId,
+        plate,
+        minutes
+      });
 
-    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes);
+    await replyMention(
+      event.replyToken,
+      event.source.userId,
+      "噴"
+    );
+
+    queueCriticalText(
+      updatedOrder.customer_line_id,
+      `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
+    );
+
     return;
   }
 
-  if (!order.decision_started && !decidingOrders.has(order.order_id)) {
-    await assignWinnerDriver(order.order_id);
+  // =========================
+  // 自動判斷
+  // =========================
 
-    decidingOrders.add(order.order_id);
+  if (
+    !order.decision_started &&
+    !decidingOrders.has(
+      order.order_id
+    )
+  ) {
+
+    await assignWinnerDriver(
+      order.order_id
+    );
+
+    decidingOrders.add(
+      order.order_id
+    );
 
     setTimeout(async () => {
-      if (!BOT_ENABLED) {
-        decidingOrders.delete(order.order_id);
-        return;
-      }
 
       try {
-        const result = await decideWinner(order.order_id);
-        if (!result) return;
 
-        const { order: assignedOrder, winner } = result;
+        const result =
+          await decideWinner(
+            order.order_id
+          );
 
-        await rememberDriverOrder({
-          driverLineId: winner.driver_line_id,
-          order: assignedOrder,
-          orderCode: winner.order_code,
-          address: winner.address,
-          plate: winner.plate
-        });
+        if (!result) {
+          return;
+        }
 
-        pushGroupWinnerMention(winner.driver_line_id);
+        const {
+          order:
+            assignedOrder,
+          winner
+        } = result;
 
-        pushCustomerDispatch(
-          assignedOrder.customer_line_id,
-          winner.plate,
-          winner.minutes
+        queueCriticalText(
+          DRIVER_GROUP_ID,
+          "@司機 噴"
         );
+
+        queueCriticalText(
+          assignedOrder.customer_line_id,
+          `司機已出發\n車牌:${winner.plate}\n約${winner.minutes}分鐘`
+        );
+
       } catch (err) {
-        console.error("decideWinner error:", err);
+
+        console.error(
+          "decideWinner error:",
+          err
+        );
+
       } finally {
-        decidingOrders.delete(order.order_id);
+
+        decidingOrders.delete(
+          order.order_id
+        );
       }
+
     }, 10000);
   }
 }
 
-async function handleReservationDriverReply(event, text) {
-  const cleanText = text.trim();
-
-  if (cleanText !== "可" && cleanText !== "不同意") {
-    return false;
-  }
-
-  for (const [orderCode, pending] of pendingReservationChanges.entries()) {
-    if (pending.driverLineId !== event.source.userId) continue;
-
-    if (cleanText === "可") {
-      pendingReservationChanges.delete(orderCode);
-
-      pushCustomerReservationChanged(
-        pending.customerLineId,
-        pending.reservationTime
-      );
-
-      await replyGroupMention(event.replyToken, event.source.userId, "可");
-      return true;
-    }
-
-    if (cleanText === "不同意") {
-      pendingReservationChanges.delete(orderCode);
-
-      await replyGroupMention(event.replyToken, event.source.userId, "X");
-
-      await resetOrderForReDispatch(pending.order.order_id);
-
-      queuePushText(
-        DRIVER_GROUP_ID,
-        `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`,
-        { merge: false }
-      );
-
-      return true;
-    }
-  }
-
-  return false;
-}
+// =========================
+// 刷單
+// =========================
 
 async function refreshOpenOrders() {
-  if (!BOT_ENABLED || !REFRESH_ENABLED) return;
+
+  if (!BOT_ENABLED) {
+    return;
+  }
+
+  if (!REFRESH_ENABLED) {
+    return;
+  }
+
+  if (circuitBreaker) {
+    return;
+  }
+
+  if (
+    Date.now() <
+    pauseRefreshUntil
+  ) {
+    return;
+  }
 
   try {
-    const orders = await getOpenOrdersForRefresh();
 
-    if (!orders || orders.length === 0) return;
+    const orders =
+      await getOpenOrdersForRefresh();
 
-    const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
+    if (
+      !orders ||
+      orders.length === 0
+    ) {
+      return;
+    }
+
+    const refreshTargets =
+      orders.slice(
+        0,
+        REFRESH_BATCH_SIZE
+      );
 
     for (const order of refreshTargets) {
-      if (!BOT_ENABLED || !REFRESH_ENABLED) return;
 
-      if (refreshingOrders.has(order.order_id)) {
+      if (
+        refreshingOrders.has(
+          order.order_id
+        )
+      ) {
+
         continue;
       }
 
-      refreshingOrders.add(order.order_id);
+      refreshingOrders.add(
+        order.order_id
+      );
 
-      const preference = await getCustomerPreference(order.customer_line_id);
+      const preference =
+        await getCustomerPreference(
+          order.customer_line_id
+        );
 
       const paymentText =
-        preference && preference.payment_method
+        preference &&
+        preference.payment_method
           ? ` ${preference.payment_method}`
           : "";
 
-      queuePushText(
+      queueRefreshText(
         DRIVER_GROUP_ID,
-        `${order.order_code} ${order.address}${paymentText}`,
-        { merge: false }
+        `${order.order_code} ${order.address}${paymentText}`
       );
 
-      await markOrderRefreshed(order.order_id);
+      await markOrderRefreshed(
+        order.order_id
+      );
 
-      refreshingOrders.delete(order.order_id);
+      refreshingOrders.delete(
+        order.order_id
+      );
 
       await delay(1000);
     }
+
   } catch (err) {
+
     refreshingOrders.clear();
 
-    console.error("refreshOpenOrders error:", err);
+    console.error(
+      "refreshOpenOrders error:",
+      err
+    );
   }
 }
 
+// =========================
+// Load Setting
+// =========================
+
 async function loadBotSettings() {
-  const botEnabled = await getBotSetting("bot_enabled");
-  const refreshEnabled = await getBotSetting("refresh_enabled");
 
-  BOT_ENABLED = botEnabled !== "false";
-  REFRESH_ENABLED = refreshEnabled !== "false";
+  const botEnabled =
+    await getBotSetting(
+      "bot_enabled"
+    );
 
-  console.log("BOT_ENABLED =", BOT_ENABLED);
-  console.log("REFRESH_ENABLED =", REFRESH_ENABLED);
+  const refreshEnabled =
+    await getBotSetting(
+      "refresh_enabled"
+    );
+
+  BOT_ENABLED =
+    botEnabled !== "false";
+
+  REFRESH_ENABLED =
+    refreshEnabled !== "false";
+
+  console.log(
+    "BOT_ENABLED:",
+    BOT_ENABLED
+  );
+
+  console.log(
+    "REFRESH_ENABLED:",
+    REFRESH_ENABLED
+  );
 }
 
-setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
+// =========================
+// Start
+// =========================
 
-const port = process.env.PORT || 3000;
+setInterval(
+  refreshOpenOrders,
+  REFRESH_INTERVAL_MS
+);
+
+app.get("/", (req, res) => {
+
+  res.send(
+    `BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED}`
+  );
+});
+
+const port =
+  process.env.PORT || 3000;
 
 loadBotSettings().then(() => {
+
   app.listen(port, () => {
-    console.log("BOT RUNNING " + port);
+
+    console.log(
+      "BOT RUNNING:",
+      port
+    );
   });
 });
