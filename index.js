@@ -253,7 +253,30 @@ async function processPushQueue() {
         currentPushGapMs - 300
       );
 
-      await delay(currentPushGapMs);
+// ====================================
+// 新單插隊機制
+// ====================================
+
+let waitMs = currentPushGapMs;
+
+while (waitMs > 0) {
+
+  // 每500ms檢查一次
+  await delay(500);
+
+  waitMs -= 500;
+
+  // 如果現在正在刷單
+  // 但有新 critical
+  // 立刻中斷等待
+  if (
+    job.priority === "refresh" &&
+    criticalQueue.length > 0
+  ) {
+
+    break;
+  }
+}
     } catch (err) {
       const status = getErrorStatus(err);
       const data = getErrorData(err);
