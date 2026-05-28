@@ -469,11 +469,19 @@ async function handleDriverReport(event, text) {
           plate: winner.plate
         });
 
-        queuePushText(
-          DRIVER_GROUP_ID,
-          `中選司機\n車牌：${winner.plate}\n約 ${winner.minutes} 分鐘`,
-          { merge: false }
-        );
+        await client.pushMessage(DRIVER_GROUP_ID, {
+  type: "textV2",
+  text: "{driver} 噴",
+  substitution: {
+    driver: {
+      type: "mention",
+      mentionee: {
+        type: "user",
+        userId: winner.driver_line_id
+      }
+    }
+  }
+});
 
         pushCustomerDispatch(
           assignedOrder.customer_line_id,
