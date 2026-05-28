@@ -1,25 +1,23 @@
+require("dotenv").config();
+
 const { createClient } = require("@supabase/supabase-js");
 
-const supabaseUrl =
-  "https://lxxkopuejdayouaxyrwq.supabase.co";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabaseKey =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.supabase_service_role_key ||
-  process.env.SUPABASE_KEY ||
-  process.env.supabase_key;
+if (!SUPABASE_URL) {
+  throw new Error("Missing SUPABASE_URL");
+}
 
-console.log("ENV:", Object.keys(process.env));
-
-console.log("SUPABASE KEY EXISTS:", !!supabaseKey);
-
-if (!supabaseKey) {
+if (!SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
 }
 
 const supabase = createClient(
-  supabaseUrl,
-  supabaseKey.trim()
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY
 );
 
-module.exports = supabase;
+module.exports = {
+  supabase
+};
