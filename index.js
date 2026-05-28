@@ -44,7 +44,7 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
-const REFRESH_INTERVAL_MS = 40 * 1000;
+const REFRESH_INTERVAL_MS = 45 * 1000;
 const REFRESH_BATCH_SIZE = 2;
 
 const pendingReservationChanges = new Map();
