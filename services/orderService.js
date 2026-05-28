@@ -1,4 +1,3 @@
-```js
 const supabase = require("../config/supabase");
 
 function makeOrderCode() {
@@ -136,7 +135,9 @@ async function decideWinner(orderId) {
     .order("minutes", { ascending: true })
     .order("created_at", { ascending: true });
 
-  if (error || !reports || reports.length === 0) return null;
+  if (error || !reports || reports.length === 0) {
+    return null;
+  }
 
   const winner = reports[0];
 
@@ -264,4 +265,3 @@ module.exports = {
   getDriverCurrentOrder,
   upsertDriverCurrentOrder
 };
-```
