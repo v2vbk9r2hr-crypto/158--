@@ -40,11 +40,7 @@ if (!process.env.DRIVER_GROUP_ID) {
 }
 
 const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
-
-// 司機群固定用官方 A 當中控
 const DRIVER_GROUP_SOURCE = "A";
-
-// Google API 先暫時不啟用
 const GOOGLE_API_ENABLED = false;
 
 const configA = {
@@ -117,7 +113,7 @@ let totalCanceled = 0;
 let totalAssigned = 0;
 
 const strictDriverRegex =
-  /^#?[A-Z]\d\/\s+[\s\S]+\s+[\u4e00-\u9fa5A-Za-z0-9\-]+\s+\d+\s*$/;
+  /^#?[A-Z]\d\/\s+[\s\S]+\s+[\u4e00-\u9fa5A-Za-z0-9\-]+\s+(\d+|到|到了|抵達|客上|上車|完成)\s*$/;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -217,19 +213,6 @@ function queueCriticalText(to, text, source = "A") {
   );
 }
 
-function queueNormalText(to, text, source = "A") {
-  addQueue(normalQueue, {
-    to,
-    retry: 0,
-    source,
-    priority: "normal",
-    message: {
-      type: "text",
-      text
-    }
-  });
-}
-
 function queueRefreshText(to, text, source = "A") {
   if (!REFRESH_ENABLED) return;
   if (circuitBreaker) return;
@@ -270,7 +253,6 @@ async function processPushQueue() {
 
     try {
       const targetClient = getClientBySource(job.source);
-
       await targetClient.pushMessage(job.to, job.message);
 
       currentPushGapMs = Math.max(
@@ -427,7 +409,11 @@ function pushCustomerDispatch(customerLineId, plate, minutes, source = "A") {
 }
 
 function pushCustomerArrived(customerLineId, plate, source = "A") {
-  queueCriticalText(customerLineId, `車輛已抵達\n車牌:${plate}`, source);
+  queueCriticalText(
+    customerLineId,
+    `車輛已抵達\n車牌:${plate}`,
+    source
+  );
 }
 
 function pushCustomerReservationChanged(
@@ -497,15 +483,36 @@ function parseStrictDriverMessage(text) {
   if (parts.length < 4) return null;
 
   const orderCode = parts[0];
-  const minutesText = parts[parts.length - 1];
+  const lastText = parts[parts.length - 1];
   const plate = parts[parts.length - 2];
   const address = parts.slice(1, parts.length - 2).join(" ");
 
-  const minutes = Number(minutesText.replace("分鐘", "").replace("分", ""));
-
   if (!orderCode.startsWith("#")) return null;
-  if (!Number.isFinite(minutes)) return null;
   if (!address || !plate) return null;
+
+  if (["到", "到了", "抵達"].includes(lastText)) {
+    return {
+      type: "arrived",
+      orderCode,
+      address,
+      plate
+    };
+  }
+
+  if (["客上", "上車", "完成"].includes(lastText)) {
+    return {
+      type: "customer_on",
+      orderCode,
+      address,
+      plate
+    };
+  }
+
+  const minutes = Number(
+    lastText.replace("分鐘", "").replace("分", "")
+  );
+
+  if (!Number.isFinite(minutes)) return null;
 
   return {
     type: "report",
