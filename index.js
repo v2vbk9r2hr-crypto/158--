@@ -1,4 +1,3 @@
-```js
 require("dotenv").config();
 
 const express = require("express");
@@ -36,6 +35,8 @@ const config = {
 
 const client = new line.Client(config);
 const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
+
+let BOT_ENABLED = true;
 
 const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
@@ -352,8 +353,34 @@ async function checkDriverCurrentOrderTime({
   return true;
 }
 
+async function handleBotControl(event, text) {
+  if (event.source.type !== "group") return false;
+
+  if (text === "停止機器人運作" || text === "停止") {
+    BOT_ENABLED = false;
+
+    pushQueue.length = 0;
+    processingOrders.clear();
+    refreshingOrders.clear();
+    decidingOrders.clear();
+    pendingReservationChanges.clear();
+
+    await replyText(client, event.replyToken, "機器人已停止運作");
+    return true;
+  }
+
+  if (text === "開始機器人運作" || text === "開始") {
+    BOT_ENABLED = true;
+
+    await replyText(client, event.replyToken, "機器人已開始運作");
+    return true;
+  }
+
+  return false;
+}
+
 app.get("/", (req, res) => {
-  res.send("Taxi Dispatch Bot Running");
+  res.send(`Taxi Dispatch Bot Running - BOT_ENABLED=${BOT_ENABLED}`);
 });
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -375,6 +402,13 @@ async function handleEvent(event) {
   if (event.message.type !== "text") return;
 
   const text = event.message.text.trim();
+
+  const controlled = await handleBotControl(event, text);
+  if (controlled) return;
+
+  if (!BOT_ENABLED) {
+    return;
+  }
 
   if (event.source.type === "user") {
     return handleCustomerOrder(event, text);
@@ -692,6 +726,11 @@ async function handleDriverReport(event, text) {
     decidingOrders.add(order.order_id);
 
     setTimeout(async () => {
+      if (!BOT_ENABLED) {
+        decidingOrders.delete(order.order_id);
+        return;
+      }
+
       try {
         const result = await decideWinner(order.order_id);
         if (!result) return;
@@ -765,6 +804,8 @@ async function handleReservationDriverReply(event, text) {
 }
 
 async function refreshOpenOrders() {
+  if (!BOT_ENABLED) return;
+
   try {
     const orders = await getOpenOrdersForRefresh();
 
@@ -773,6 +814,8 @@ async function refreshOpenOrders() {
     const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
 
     for (const order of refreshTargets) {
+      if (!BOT_ENABLED) return;
+
       if (refreshingOrders.has(order.order_id)) {
         continue;
       }
@@ -812,4 +855,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("BOT RUNNING " + port);
 });
-```
