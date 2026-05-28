@@ -946,21 +946,6 @@ async function handleDriverReport(event, text, clientObj, source) {
     return;
   }
 
-  const currentDriverOrder = await getDriverCurrentOrder(event.source.userId);
-
-  if (currentDriverOrder && currentDriverOrder.order_id !== order.order_id) {
-    const ok = await checkDriverCurrentOrderTime({
-      clientObj,
-      driverLineId: event.source.userId,
-      replyToken: event.replyToken,
-      currentOrder: currentDriverOrder,
-      newAddress: address,
-      reportMinutes: minutes
-    });
-
-    if (!ok) return;
-  }
-
   if (order.status === "assigned") {
     const oldArrival = getArrivalTimeMs(
       order.assigned_at,
