@@ -43,8 +43,8 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
-const REFRESH_INTERVAL_MS = 20 * 1000;
-const REFRESH_BATCH_SIZE = 3;
+const REFRESH_INTERVAL_MS = 40 * 1000;
+const REFRESH_BATCH_SIZE = 2;
 
 const pendingReservationChanges = new Map();
 
@@ -55,9 +55,9 @@ const decidingOrders = new Set();
 const pushQueue = [];
 let isPushSending = false;
 
-const PUSH_GAP_MS = 2500;
-const MIN_PUSH_GAP_MS = 1800;
-const MAX_PUSH_GAP_MS = 8000;
+const PUSH_GAP_MS = 4000;
+const MIN_PUSH_GAP_MS = 3000;
+const MAX_PUSH_GAP_MS = 15000;
 const MERGE_WINDOW_MS = 1500;
 const MAX_RETRY = 5;
 
