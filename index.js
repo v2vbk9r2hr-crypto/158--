@@ -608,6 +608,136 @@ function checkDriverCooldown(
 }
 
 // ========================================
+// Bot Control
+// ========================================
+
+async function handleBotControl(
+  event,
+  text,
+  clientObj
+) {
+
+  if (
+    event.source.type !==
+    "group"
+  ) {
+    return false;
+  }
+
+  // ====================================
+  // 停止機器人
+  // ====================================
+
+  if (
+    text ===
+      "停止機器人運作" ||
+    text === "停止"
+  ) {
+
+    BOT_ENABLED = false;
+
+    criticalQueue.length = 0;
+    normalQueue.length = 0;
+    refreshQueue.length = 0;
+
+    await replyText(
+      clientObj,
+      event.replyToken,
+      "機器人已停止運作"
+    );
+
+    return true;
+  }
+
+  // ====================================
+  // 開始機器人
+  // ====================================
+
+  if (
+    text ===
+      "開始機器人運作" ||
+    text === "開始"
+  ) {
+
+    BOT_ENABLED = true;
+
+    await replyText(
+      clientObj,
+      event.replyToken,
+      "機器人已開始運作"
+    );
+
+    return true;
+  }
+
+  // ====================================
+  // 停止刷單
+  // ====================================
+
+  if (
+    text === "停止刷單"
+  ) {
+
+    REFRESH_ENABLED = false;
+
+    await replyText(
+      clientObj,
+      event.replyToken,
+      "刷單功能已停止"
+    );
+
+    return true;
+  }
+
+  // ====================================
+  // 開始刷單
+  // ====================================
+
+  if (
+    text === "開始刷單"
+  ) {
+
+    REFRESH_ENABLED = true;
+
+    await replyText(
+      clientObj,
+      event.replyToken,
+      "刷單功能已開始"
+    );
+
+    return true;
+  }
+
+  // ====================================
+  // 系統狀態
+  // ====================================
+
+  if (
+    text === "系統狀態"
+  ) {
+
+    await replyText(
+      clientObj,
+      event.replyToken,
+
+`BOT:${BOT_ENABLED}
+REFRESH:${REFRESH_ENABLED}
+429:${total429}
+總訂單:${totalOrders}
+已取消:${totalCanceled}
+已派送:${totalAssigned}
+Critical:${criticalQueue.length}
+Normal:${normalQueue.length}
+Refresh:${refreshQueue.length}`
+    );
+
+    return true;
+  }
+
+  return false;
+}
+
+// ========================================
 // 官方A webhook
 // ========================================
 
