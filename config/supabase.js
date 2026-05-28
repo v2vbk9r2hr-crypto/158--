@@ -11,6 +11,9 @@ const supabaseKey =
 if (!supabaseUrl) throw new Error("Missing SUPABASE_URL");
 if (!supabaseKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
 
-const supabase = createClient(supabaseUrl.trim(), supabaseKey.trim());
+const supabase = createClient(
+  supabaseUrl.trim(),
+  supabaseKey.trim()
+);
 
 module.exports = supabase;
