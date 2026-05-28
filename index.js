@@ -541,6 +541,23 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   }
 });
 
+const configB = {
+  channelAccessToken: process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.LINE_B_CHANNEL_SECRET
+};
+
+app.post("/webhook-b", line.middleware(configB), async (req, res) => {
+  res.status(200).end();
+
+  const events = req.body.events || [];
+
+  for (const event of events) {
+    handleEvent(event).catch(err => {
+      console.error("handleEvent B error:", err);
+    });
+  }
+});
+
 async function handleEvent(event) {
   if (event.type !== "message") return;
   if (event.message.type !== "text") return;
