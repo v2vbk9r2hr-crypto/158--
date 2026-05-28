@@ -1,3 +1,4 @@
+```js
 const supabase = require("../config/supabase");
 
 function makeOrderCode() {
@@ -42,6 +43,23 @@ async function getOrderByCodeAndAddress(orderCode, address) {
 
   if (error) {
     console.error("getOrderByCodeAndAddress error:", error);
+    return null;
+  }
+
+  return data;
+}
+
+async function getLatestCustomerOrder(customerLineId) {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("customer_line_id", customerLineId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getLatestCustomerOrder error:", error);
     return null;
   }
 
@@ -165,6 +183,29 @@ async function overrideDriver({ order, driverLineId, plate, minutes }) {
   return data;
 }
 
+async function resetOrderForReDispatch(orderId) {
+  const { data, error } = await supabase
+    .from("orders")
+    .update({
+      status: "open",
+      assigned_driver_line_id: null,
+      assigned_plate: null,
+      assigned_minutes: null,
+      assigned_at: null,
+      decision_started: false
+    })
+    .eq("order_id", orderId)
+    .select()
+    .single();
+
+  if (error) {
+    console.error("resetOrderForReDispatch error:", error);
+    throw error;
+  }
+
+  return data;
+}
+
 async function getDriverCurrentOrder(driverLineId) {
   const { data, error } = await supabase
     .from("driver_current_orders")
@@ -213,11 +254,14 @@ async function upsertDriverCurrentOrder({
 module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
+  getLatestCustomerOrder,
   addDriverReport,
   getFirstDriverReport,
   assignWinnerDriver,
   decideWinner,
   overrideDriver,
+  resetOrderForReDispatch,
   getDriverCurrentOrder,
   upsertDriverCurrentOrder
 };
+```

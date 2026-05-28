@@ -8,6 +8,8 @@ const {
   addDriverReport,
   decideWinner,
   getOrderByCodeAndAddress,
+  getLatestCustomerOrder,
+  resetOrderForReDispatch,
   assignWinnerDriver,
   overrideDriver,
   getFirstDriverReport,
@@ -34,9 +36,7 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
-// =========================
-// 防 429 Push Queue
-// =========================
+const pendingReservationChanges = new Map();
 
 const pushQueue = [];
 let isPushSending = false;
@@ -128,7 +128,6 @@ async function processPushQueue() {
       );
 
       await delay(currentPushGapMs);
-
     } catch (err) {
       const status = getErrorStatus(err);
       const data = getErrorData(err);
@@ -168,10 +167,6 @@ async function processPushQueue() {
 
   isPushSending = false;
 }
-
-// =========================
-// LINE mention
-// =========================
 
 async function replyGroupMention(replyToken, userId, text) {
   try {
@@ -240,10 +235,6 @@ function pushGroupWinnerMention(driverLineId) {
   );
 }
 
-// =========================
-// Customer Push
-// =========================
-
 function pushCustomerDispatch(customerLineId, plate, minutes) {
   queuePushText(
     customerLineId,
@@ -260,9 +251,35 @@ function pushCustomerArrived(customerLineId, plate) {
   );
 }
 
-// =========================
-// Driver Order
-// =========================
+function pushCustomerReservationChanged(customerLineId, reservationTime) {
+  queuePushText(
+    customerLineId,
+    `已為您更改為預約單\n預約時間：${reservationTime}`,
+    { merge: false }
+  );
+}
+
+function pushAskDriverReservationChange(order, reservationTime) {
+  queuePushMessage(
+    DRIVER_GROUP_ID,
+    {
+      type: "textV2",
+      text:
+        `${order.order_code} ${reservationTime} ${order.address}\n` +
+        "{driver} 可不可更改",
+      substitution: {
+        driver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: order.assigned_driver_line_id
+          }
+        }
+      }
+    },
+    { merge: false }
+  );
+}
 
 async function rememberDriverOrder({
   driverLineId,
@@ -296,13 +313,6 @@ async function checkDriverCurrentOrderTime({
     newAddress
   );
 
-  console.log("Google 車程判斷：", {
-    from: currentOrder.address,
-    to: newAddress,
-    googleMinutes,
-    reportMinutes
-  });
-
   if (googleMinutes === null) return true;
 
   if (Number(reportMinutes) < googleMinutes - GOOGLE_TOLERANCE_MINUTES) {
@@ -312,10 +322,6 @@ async function checkDriverCurrentOrderTime({
 
   return true;
 }
-
-// =========================
-// Routes
-// =========================
 
 app.get("/", (req, res) => {
   res.send("Taxi Dispatch Bot Running - Safe Queue Mode");
@@ -332,10 +338,6 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     });
   }
 });
-
-// =========================
-// Main Event
-// =========================
 
 async function handleEvent(event) {
   console.log("SOURCE:", event.source);
@@ -355,6 +357,10 @@ async function handleEvent(event) {
 }
 
 async function handleCustomerOrder(event, address) {
+  if (address.startsWith("改預約")) {
+    return handleCustomerChangeToReservation(event, address);
+  }
+
   if (address.length < 3) {
     return replyText(client, event.replyToken, "請輸入完整地址");
   }
@@ -373,7 +379,60 @@ async function handleCustomerOrder(event, address) {
   );
 }
 
+async function handleCustomerChangeToReservation(event, text) {
+  const parts = text.split(/\s+/);
+
+  if (parts.length < 2) {
+    return replyText(
+      client,
+      event.replyToken,
+      "格式錯誤\n例如：改預約 18:30"
+    );
+  }
+
+  const reservationTime = parts[1];
+
+  const order = await getLatestCustomerOrder(event.source.userId);
+
+  if (!order) {
+    return replyText(client, event.replyToken, "找不到您目前的訂單");
+  }
+
+  if (order.status !== "assigned" || !order.assigned_driver_line_id) {
+    queuePushText(
+      DRIVER_GROUP_ID,
+      `${order.order_code} ${reservationTime} ${order.address}`,
+      { merge: false }
+    );
+
+    return replyText(
+      client,
+      event.replyToken,
+      `已改成預約單\n預約時間：${reservationTime}`
+    );
+  }
+
+  pendingReservationChanges.set(order.order_code, {
+    order,
+    reservationTime,
+    address: order.address,
+    customerLineId: order.customer_line_id,
+    driverLineId: order.assigned_driver_line_id
+  });
+
+  pushAskDriverReservationChange(order, reservationTime);
+
+  return replyText(
+    client,
+    event.replyToken,
+    "已詢問司機是否可更改，請稍等"
+  );
+}
+
 async function handleDriverReport(event, text) {
+  const reservationReply = await handleReservationDriverReply(event, text);
+  if (reservationReply) return;
+
   const parsed = parseDriverMessage(text);
 
   if (!parsed) {
@@ -560,9 +619,58 @@ async function handleDriverReport(event, text) {
   }
 }
 
-// =========================
-// Start Server
-// =========================
+async function handleReservationDriverReply(event, text) {
+  const cleanText = text.trim();
+
+  if (cleanText !== "可" && cleanText !== "不同意") {
+    return false;
+  }
+
+  for (const [orderCode, pending] of pendingReservationChanges.entries()) {
+    if (pending.driverLineId !== event.source.userId) {
+      continue;
+    }
+
+    if (cleanText === "可") {
+      pendingReservationChanges.delete(orderCode);
+
+      pushCustomerReservationChanged(
+        pending.customerLineId,
+        pending.reservationTime
+      );
+
+      await replyGroupMention(
+        event.replyToken,
+        event.source.userId,
+        "可"
+      );
+
+      return true;
+    }
+
+    if (cleanText === "不同意") {
+      pendingReservationChanges.delete(orderCode);
+
+      await replyGroupMention(
+        event.replyToken,
+        event.source.userId,
+        "X"
+      );
+
+      await resetOrderForReDispatch(pending.order.order_id);
+
+      queuePushText(
+        DRIVER_GROUP_ID,
+        `${pending.order.order_code} ${pending.reservationTime} ${pending.address}`,
+        { merge: false }
+      );
+
+      return true;
+    }
+  }
+
+  return false;
+}
 
 const port = process.env.PORT || 3000;
 
