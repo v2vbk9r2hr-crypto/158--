@@ -791,7 +791,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
     queueCriticalText(
       DRIVER_GROUP_ID,
       `${order.order_code} ${order.address}${paymentText}${feeText}`,
-      source
+      "A"
     );
   } catch (err) {
     processingOrders.delete(customerLineId);
@@ -831,7 +831,7 @@ async function handleCustomerChangeToReservation(
     queueCriticalText(
       DRIVER_GROUP_ID,
       `${order.order_code} ${reservationTime} ${order.address}${paymentText}`,
-      orderSource
+      "A"
     );
 
     return replyText(
@@ -991,7 +991,7 @@ async function handleDriverReport(event, text, clientObj, source) {
       plate
     });
 
-    queueTwoMentions(oldDriverLineId, event.source.userId, orderSource);
+    queueTwoMentions(oldDriverLineId, event.source.userId, "A");
 
     pushCustomerDispatch(
       updatedOrder.customer_line_id,
@@ -1141,7 +1141,7 @@ async function refreshOpenOrders() {
       queueRefreshText(
         DRIVER_GROUP_ID,
         `${order.order_code} ${order.address}${paymentText}`,
-        orderSource
+        "A"
       );
 
       await markOrderRefreshed(order.order_id);
