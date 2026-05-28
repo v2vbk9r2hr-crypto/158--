@@ -18,16 +18,34 @@ const {
   assignWinnerDriver,
   overrideDriver,
   getFirstDriverReport,
-  getDriverCurrentOrder,
   upsertDriverCurrentOrder,
   getBotSetting,
   setBotSetting
 } = require("./services/orderService");
 
 const { parseDriverMessage } = require("./utils/parser");
-const { getDrivingMinutes } = require("./services/googleDistanceService");
 
 const app = express();
+
+if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) {
+  throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
+}
+
+if (!process.env.LINE_CHANNEL_SECRET) {
+  throw new Error("Missing LINE_CHANNEL_SECRET");
+}
+
+if (!process.env.DRIVER_GROUP_ID) {
+  throw new Error("Missing DRIVER_GROUP_ID");
+}
+
+const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
+
+// 司機群固定用官方 A 當中控
+const DRIVER_GROUP_SOURCE = "A";
+
+// Google API 先暫時不啟用
+const GOOGLE_API_ENABLED = false;
 
 const configA = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -55,15 +73,12 @@ if (hasLineB) {
   console.log("官方B 尚未啟用");
 }
 
-const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
-
 let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
 
 const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
-const GOOGLE_TOLERANCE_MINUTES = 3;
 
 const REFRESH_INTERVAL_MS = 45 * 1000;
 const REFRESH_BATCH_SIZE = 3;
@@ -356,7 +371,7 @@ async function replyMention(clientObj, replyToken, userId, text) {
   });
 }
 
-function queueGroupMention(userId, text, source = "A") {
+function queueGroupMention(userId, text) {
   queueCriticalMessage(
     DRIVER_GROUP_ID,
     {
@@ -372,11 +387,11 @@ function queueGroupMention(userId, text, source = "A") {
         }
       }
     },
-    source
+    DRIVER_GROUP_SOURCE
   );
 }
 
-function queueTwoMentions(oldUserId, newUserId, source = "A") {
+function queueTwoMentions(oldUserId, newUserId) {
   queueCriticalMessage(
     DRIVER_GROUP_ID,
     {
@@ -399,7 +414,7 @@ function queueTwoMentions(oldUserId, newUserId, source = "A") {
         }
       }
     },
-    source
+    DRIVER_GROUP_SOURCE
   );
 }
 
@@ -430,8 +445,7 @@ function pushCustomerReservationChanged(
 function pushAskDriverReservationChange(
   order,
   reservationTime,
-  paymentText = "",
-  source = "A"
+  paymentText = ""
 ) {
   queueCriticalMessage(
     DRIVER_GROUP_ID,
@@ -450,7 +464,7 @@ function pushAskDriverReservationChange(
         }
       }
     },
-    source
+    DRIVER_GROUP_SOURCE
   );
 }
 
@@ -520,31 +534,6 @@ async function rememberDriverOrder({
   });
 }
 
-async function checkDriverCurrentOrderTime({
-  clientObj,
-  driverLineId,
-  replyToken,
-  currentOrder,
-  newAddress,
-  reportMinutes
-}) {
-  if (!currentOrder || !currentOrder.address) return true;
-
-  const googleMinutes = await getDrivingMinutes(
-    currentOrder.address,
-    newAddress
-  );
-
-  if (googleMinutes === null) return true;
-
-  if (Number(reportMinutes) < googleMinutes - GOOGLE_TOLERANCE_MINUTES) {
-    await replyMention(clientObj, replyToken, driverLineId, "X");
-    return false;
-  }
-
-  return true;
-}
-
 async function handleBotControl(event, text, clientObj) {
   if (event.source.type !== "group") return false;
 
@@ -598,7 +587,8 @@ REFRESH:${REFRESH_ENABLED}
 已派送:${totalAssigned}
 Critical:${criticalQueue.length}
 Normal:${normalQueue.length}
-Refresh:${refreshQueue.length}`
+Refresh:${refreshQueue.length}
+GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
     );
 
     return true;
@@ -652,8 +642,7 @@ async function handleEvent(event, clientObj, source) {
       const reservationReply = await handleReservationDriverReply(
         event,
         text,
-        clientObj,
-        source
+        clientObj
       );
 
       if (reservationReply) return;
@@ -668,7 +657,7 @@ async function handleEvent(event, clientObj, source) {
       return;
     }
 
-    return handleDriverReport(event, text, clientObj, source);
+    return handleDriverReport(event, text, clientObj);
   }
 
   if (event.source.type === "user") {
@@ -707,13 +696,10 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
         return replyText(clientObj, event.replyToken, "目前沒有可取消的訂單");
       }
 
-      const orderSource = canceledOrder.source_name || "A";
-
       if (canceledOrder.assigned_driver_line_id) {
         queueGroupMention(
           canceledOrder.assigned_driver_line_id,
-          "取",
-          "A"
+          "取"
         );
       }
 
@@ -761,8 +747,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       return handleCustomerChangeToReservation(
         event,
         addressText,
-        clientObj,
-        source
+        clientObj
       );
     }
 
@@ -791,7 +776,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
     queueCriticalText(
       DRIVER_GROUP_ID,
       `${order.order_code} ${order.address}${paymentText}${feeText}`,
-      "A"
+      DRIVER_GROUP_SOURCE
     );
   } catch (err) {
     processingOrders.delete(customerLineId);
@@ -803,8 +788,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
 async function handleCustomerChangeToReservation(
   event,
   text,
-  clientObj,
-  source
+  clientObj
 ) {
   const parts = text.split(/\s+/);
 
@@ -831,7 +815,7 @@ async function handleCustomerChangeToReservation(
     queueCriticalText(
       DRIVER_GROUP_ID,
       `${order.order_code} ${reservationTime} ${order.address}${paymentText}`,
-      "A"
+      DRIVER_GROUP_SOURCE
     );
 
     return replyText(
@@ -851,12 +835,12 @@ async function handleCustomerChangeToReservation(
     source: orderSource
   });
 
-  pushAskDriverReservationChange(order, reservationTime, paymentText, "A");
+  pushAskDriverReservationChange(order, reservationTime, paymentText);
 
   return replyText(clientObj, event.replyToken, "已詢問司機是否可更改，請稍等");
 }
 
-async function handleReservationDriverReply(event, text, clientObj, source) {
+async function handleReservationDriverReply(event, text, clientObj) {
   const cleanText = text.trim();
 
   if (cleanText !== "可" && cleanText !== "不同意") {
@@ -891,7 +875,7 @@ async function handleReservationDriverReply(event, text, clientObj, source) {
       queueCriticalText(
         DRIVER_GROUP_ID,
         `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`,
-        "A"
+        DRIVER_GROUP_SOURCE
       );
 
       return true;
@@ -901,7 +885,7 @@ async function handleReservationDriverReply(event, text, clientObj, source) {
   return false;
 }
 
-async function handleDriverReport(event, text, clientObj, source) {
+async function handleDriverReport(event, text, clientObj) {
   const parsed = parseDriverMessage(text) || parseStrictDriverMessage(text);
   if (!parsed) return;
 
@@ -976,7 +960,7 @@ async function handleDriverReport(event, text, clientObj, source) {
       plate
     });
 
-    queueTwoMentions(oldDriverLineId, event.source.userId, "A");
+    queueTwoMentions(oldDriverLineId, event.source.userId);
 
     pushCustomerDispatch(
       updatedOrder.customer_line_id,
@@ -1069,7 +1053,7 @@ async function handleDriverReport(event, text, clientObj, source) {
           plate: winner.plate
         });
 
-        queueGroupMention(winner.driver_line_id, "噴", "A");
+        queueGroupMention(winner.driver_line_id, "噴");
 
         pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -1105,7 +1089,7 @@ async function refreshOpenOrders() {
     queueRefreshText(
       DRIVER_GROUP_ID,
       "🪳---🪳 我是分隔線 🪳---🪳",
-      "A"
+      DRIVER_GROUP_SOURCE
     );
 
     for (const order of refreshTargets) {
@@ -1124,7 +1108,7 @@ async function refreshOpenOrders() {
       queueRefreshText(
         DRIVER_GROUP_ID,
         `${order.order_code} ${order.address}${paymentText}`,
-        "A"
+        DRIVER_GROUP_SOURCE
       );
 
       await markOrderRefreshed(order.order_id);
@@ -1150,14 +1134,15 @@ setInterval(() => {
     `Critical:${criticalQueue.length}
 Normal:${normalQueue.length}
 Refresh:${refreshQueue.length}
-429:${total429}`
+429:${total429}
+GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
   );
 }, 5 * 60 * 1000);
 
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 app.get("/", (req, res) => {
-  res.send(`BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED}`);
+  res.send(`BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED} GOOGLE=${GOOGLE_API_ENABLED}`);
 });
 
 async function loadBotSettings() {
@@ -1173,7 +1158,8 @@ const port = process.env.PORT || 3000;
 loadBotSettings().then(() => {
   app.listen(port, () => {
     console.log("BOT RUNNING:", port);
-    console.log("LINE_B_SECRET exists:", !!process.env.LINE_B_CHANNEL_SECRET);
-    console.log("LINE_B_TOKEN exists:", !!process.env.LINE_B_CHANNEL_ACCESS_TOKEN);
+    console.log("官方A: ON");
+    console.log("官方B:", hasLineB ? "ON" : "OFF");
+    console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
