@@ -17,7 +17,8 @@ async function createOrder(address, customerLineId) {
       address,
       customer_line_id: customerLineId,
       status: "open",
-      decision_started: false
+      decision_started: false,
+      last_refreshed_at: new Date().toISOString()
     })
     .select()
     .single();
@@ -151,7 +152,9 @@ async function getFirstDriverReport(orderId) {
 async function assignWinnerDriver(orderId) {
   const { data, error } = await supabase
     .from("orders")
-    .update({ decision_started: true })
+    .update({
+      decision_started: true
+    })
     .eq("order_id", orderId)
     .select()
     .single();
@@ -228,7 +231,8 @@ async function resetOrderForReDispatch(orderId) {
       assigned_plate: null,
       assigned_minutes: null,
       assigned_at: null,
-      decision_started: false
+      decision_started: false,
+      last_refreshed_at: null
     })
     .eq("order_id", orderId)
     .select()
@@ -237,6 +241,71 @@ async function resetOrderForReDispatch(orderId) {
   if (error) {
     console.error("resetOrderForReDispatch error:", error);
     throw error;
+  }
+
+  return data;
+}
+
+async function getOpenOrdersForRefresh() {
+  const threeMinutesAgo = new Date(
+    Date.now() - 3 * 60 * 1000
+  ).toISOString();
+
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("status", "open")
+    .eq("decision_started", false)
+    .or(`last_refreshed_at.is.null,last_refreshed_at.lt.${threeMinutesAgo}`)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    console.error("getOpenOrdersForRefresh error:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function markOrderRefreshed(orderId) {
+  const { error } = await supabase
+    .from("orders")
+    .update({
+      last_refreshed_at: new Date().toISOString()
+    })
+    .eq("order_id", orderId);
+
+  if (error) {
+    console.error("markOrderRefreshed error:", error);
+  }
+}
+
+async function cancelLatestCustomerOrder(customerLineId) {
+  const latestOrder = await getLatestCustomerOrder(customerLineId);
+
+  if (!latestOrder) return null;
+
+  if (
+    latestOrder.status !== "open" &&
+    latestOrder.status !== "assigned"
+  ) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("orders")
+    .update({
+      status: "canceled",
+      canceled_at: new Date().toISOString(),
+      decision_started: false
+    })
+    .eq("order_id", latestOrder.order_id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error("cancelLatestCustomerOrder error:", error);
+    return null;
   }
 
   return data;
@@ -299,6 +368,9 @@ module.exports = {
   decideWinner,
   overrideDriver,
   resetOrderForReDispatch,
+  getOpenOrdersForRefresh,
+  markOrderRefreshed,
+  cancelLatestCustomerOrder,
   getDriverCurrentOrder,
   upsertDriverCurrentOrder
 };

@@ -12,6 +12,9 @@ const {
   upsertCustomerPreference,
   getCustomerPreference,
   resetOrderForReDispatch,
+  getOpenOrdersForRefresh,
+  markOrderRefreshed,
+  cancelLatestCustomerOrder,
   assignWinnerDriver,
   overrideDriver,
   getFirstDriverReport,
@@ -37,6 +40,7 @@ const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
+const REFRESH_INTERVAL_MS = 3 * 60 * 1000;
 
 const pendingReservationChanges = new Map();
 
@@ -352,7 +356,7 @@ async function checkDriverCurrentOrderTime({
 }
 
 app.get("/", (req, res) => {
-  res.send("Taxi Dispatch Bot Running - Safe Queue Mode");
+  res.send("Taxi Dispatch Bot Running - Safe Queue Mode + Refresh Orders");
 });
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -386,6 +390,28 @@ async function handleEvent(event) {
 
 async function handleCustomerOrder(event, addressText) {
   const customerLineId = event.source.userId;
+
+  if (
+    addressText === "取消叫車" ||
+    addressText === "取消" ||
+    addressText === "不用車"
+  ) {
+    const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
+
+    if (!canceledOrder) {
+      return replyText(
+        client,
+        event.replyToken,
+        "目前沒有可取消的訂單"
+      );
+    }
+
+    return replyText(
+      client,
+      event.replyToken,
+      "已為您取消叫車"
+    );
+  }
 
   if (addressText === "取消付款設定") {
     await upsertCustomerPreference(customerLineId, "");
@@ -747,6 +773,35 @@ async function handleReservationDriverReply(event, text) {
 
   return false;
 }
+
+async function refreshOpenOrders() {
+  try {
+    const orders = await getOpenOrdersForRefresh();
+
+    if (!orders || orders.length === 0) return;
+
+    for (const order of orders) {
+      const preference = await getCustomerPreference(order.customer_line_id);
+
+      const paymentText =
+        preference && preference.payment_method
+          ? ` ${preference.payment_method}`
+          : "";
+
+      queuePushText(
+        DRIVER_GROUP_ID,
+        `${order.order_code} ${order.address}${paymentText}`,
+        { merge: false }
+      );
+
+      await markOrderRefreshed(order.order_id);
+    }
+  } catch (err) {
+    console.error("refreshOpenOrders error:", err);
+  }
+}
+
+setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 const port = process.env.PORT || 3000;
 
