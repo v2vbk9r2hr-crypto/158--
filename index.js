@@ -37,6 +37,7 @@ const client = new line.Client(config);
 const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
 
 let BOT_ENABLED = true;
+let REFRESH_ENABLED = true;
 
 const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
@@ -358,7 +359,6 @@ async function handleBotControl(event, text) {
 
   if (text === "停止機器人運作" || text === "停止") {
     BOT_ENABLED = false;
-
     pushQueue.length = 0;
     processingOrders.clear();
     refreshingOrders.clear();
@@ -373,6 +373,21 @@ async function handleBotControl(event, text) {
     BOT_ENABLED = true;
 
     await replyText(client, event.replyToken, "機器人已開始運作");
+    return true;
+  }
+
+  if (text === "停止刷單") {
+    REFRESH_ENABLED = false;
+    refreshingOrders.clear();
+
+    await replyText(client, event.replyToken, "刷單功能已停止");
+    return true;
+  }
+
+  if (text === "開始刷單") {
+    REFRESH_ENABLED = true;
+
+    await replyText(client, event.replyToken, "刷單功能已開始");
     return true;
   }
 
