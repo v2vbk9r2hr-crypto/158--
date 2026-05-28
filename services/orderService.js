@@ -1,33 +1,39 @@
-const supabase = require("../config/supabase");
+const crypto = require("crypto");
+const { supabase } = require("../config/supabase");
 
-function makeOrderCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const letter = chars[Math.floor(Math.random() * chars.length)];
-  const number = Math.floor(Math.random() * 9) + 1;
-  return `#${letter}${number}/`;
+function makeOrderId() {
+  return crypto.randomUUID();
 }
 
 async function createOrder(address, customerLineId, source = "A") {
-  const orderCode = makeOrderCode();
+  const sourceName = source || "A";
+  const orderId = makeOrderId();
+
+  const { count, error: countError } = await supabase
+    .from("orders")
+    .select("*", { count: "exact", head: true })
+    .eq("source_name", sourceName);
+
+  if (countError) throw countError;
+
+  const orderCode = `#${sourceName}${(count || 0) + 1}/`;
 
   const { data, error } = await supabase
     .from("orders")
-    .insert({
-      order_code: orderCode,
-      address,
-      customer_line_id: customerLineId,
-      status: "open",
-      decision_started: false,
-      source_name: source
-    })
+    .insert([
+      {
+        order_id: orderId,
+        order_code: orderCode,
+        address,
+        customer_line_id: customerLineId,
+        source_name: sourceName,
+        status: "waiting"
+      }
+    ])
     .select()
     .single();
 
-  if (error) {
-    console.error("createOrder error:", error);
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -37,16 +43,26 @@ async function getOrderByCodeAndAddress(orderCode, address) {
     .select("*")
     .eq("order_code", orderCode)
     .eq("address", address)
+    .neq("status", "completed")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (error) {
-    console.error("getOrderByCodeAndAddress error:", error);
-    return null;
-  }
+  if (error) throw error;
 
-  return data;
+  if (data) return data;
+
+  const { data: fallback, error: fallbackError } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("order_code", orderCode)
+    .neq("status", "completed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (fallbackError) throw fallbackError;
+  return fallback;
 }
 
 async function getLatestCustomerOrder(customerLineId) {
@@ -54,15 +70,12 @@ async function getLatestCustomerOrder(customerLineId) {
     .from("orders")
     .select("*")
     .eq("customer_line_id", customerLineId)
+    .in("status", ["waiting", "assigned", "arrived", "customer_on"])
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (error) {
-    console.error("getLatestCustomerOrder error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -80,11 +93,7 @@ async function upsertCustomerPreference(customerLineId, paymentMethod) {
     .select()
     .single();
 
-  if (error) {
-    console.error("upsertCustomerPreference error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -95,11 +104,7 @@ async function getCustomerPreference(customerLineId) {
     .eq("customer_line_id", customerLineId)
     .maybeSingle();
 
-  if (error) {
-    console.error("getCustomerPreference error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -113,22 +118,20 @@ async function addDriverReport({
 }) {
   const { data, error } = await supabase
     .from("driver_reports")
-    .insert({
-      order_id: orderId,
-      order_code: orderCode,
-      address,
-      driver_line_id: driverLineId,
-      plate,
-      minutes
-    })
+    .insert([
+      {
+        order_id: orderId,
+        order_code: orderCode,
+        address,
+        driver_line_id: driverLineId,
+        plate,
+        minutes
+      }
+    ])
     .select()
     .single();
 
-  if (error) {
-    console.error("addDriverReport error:", error);
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -141,11 +144,7 @@ async function getFirstDriverReport(orderId) {
     .limit(1)
     .maybeSingle();
 
-  if (error) {
-    console.error("getFirstDriverReport error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -159,29 +158,24 @@ async function assignWinnerDriver(orderId) {
     .select()
     .single();
 
-  if (error) {
-    console.error("assignWinnerDriver error:", error);
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function decideWinner(orderId) {
-  const { data: reports, error } = await supabase
+  const { data: reports, error: reportError } = await supabase
     .from("driver_reports")
     .select("*")
     .eq("order_id", orderId)
     .order("minutes", { ascending: true })
     .order("created_at", { ascending: true });
 
-  if (error || !reports || reports.length === 0) {
-    return null;
-  }
+  if (reportError) throw reportError;
+  if (!reports || reports.length === 0) return null;
 
   const winner = reports[0];
 
-  const { data: order, error: updateError } = await supabase
+  const { data: order, error: orderError } = await supabase
     .from("orders")
     .update({
       status: "assigned",
@@ -194,12 +188,12 @@ async function decideWinner(orderId) {
     .select()
     .single();
 
-  if (updateError) {
-    console.error("decideWinner update error:", updateError);
-    return null;
-  }
+  if (orderError) throw orderError;
 
-  return { order, winner };
+  return {
+    order,
+    winner
+  };
 }
 
 async function overrideDriver({ order, driverLineId, plate, minutes }) {
@@ -210,17 +204,14 @@ async function overrideDriver({ order, driverLineId, plate, minutes }) {
       assigned_driver_line_id: driverLineId,
       assigned_plate: plate,
       assigned_minutes: minutes,
-      assigned_at: new Date().toISOString()
+      assigned_at: new Date().toISOString(),
+      decision_started: true
     })
     .eq("order_id", order.order_id)
     .select()
     .single();
 
-  if (error) {
-    console.error("overrideDriver error:", error);
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -228,83 +219,51 @@ async function resetOrderForReDispatch(orderId) {
   const { data, error } = await supabase
     .from("orders")
     .update({
-      status: "open",
+      status: "waiting",
       assigned_driver_line_id: null,
       assigned_plate: null,
       assigned_minutes: null,
       assigned_at: null,
-      decision_started: false,
-      last_refreshed_at: null
+      decision_started: false
     })
     .eq("order_id", orderId)
     .select()
     .single();
 
-  if (error) {
-    console.error("resetOrderForReDispatch error:", error);
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function getOpenOrdersForRefresh() {
-  const refreshAgo = new Date(Date.now() - 3 * 60 * 1000).toISOString();
-
   const { data, error } = await supabase
     .from("orders")
     .select("*")
-    .eq("status", "open")
-    .eq("decision_started", false)
-    .or(`last_refreshed_at.is.null,last_refreshed_at.lt.${refreshAgo}`)
+    .eq("status", "waiting")
     .order("created_at", { ascending: true });
 
-  if (error) {
-    console.error("getOpenOrdersForRefresh error:", error);
-    return [];
-  }
-
+  if (error) throw error;
   return data || [];
 }
 
 async function markOrderRefreshed(orderId) {
-  const { error } = await supabase
-    .from("orders")
-    .update({
-      last_refreshed_at: new Date().toISOString()
-    })
-    .eq("order_id", orderId);
-
-  if (error) {
-    console.error("markOrderRefreshed error:", error);
-  }
+  return true;
 }
 
 async function cancelLatestCustomerOrder(customerLineId) {
-  const latestOrder = await getLatestCustomerOrder(customerLineId);
+  const order = await getLatestCustomerOrder(customerLineId);
 
-  if (!latestOrder) return null;
-
-  if (latestOrder.status !== "open" && latestOrder.status !== "assigned") {
-    return null;
-  }
+  if (!order) return null;
 
   const { data, error } = await supabase
     .from("orders")
     .update({
-      status: "canceled",
-      canceled_at: new Date().toISOString(),
-      decision_started: false
+      status: "canceled"
     })
-    .eq("order_id", latestOrder.order_id)
+    .eq("order_id", order.order_id)
     .select()
     .single();
 
-  if (error) {
-    console.error("cancelLatestCustomerOrder error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -315,11 +274,7 @@ async function getDriverCurrentOrder(driverLineId) {
     .eq("driver_line_id", driverLineId)
     .maybeSingle();
 
-  if (error) {
-    console.error("getDriverCurrentOrder error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -343,16 +298,14 @@ async function upsertDriverCurrentOrder({
         status,
         updated_at: new Date().toISOString()
       },
-      { onConflict: "driver_line_id" }
+      {
+        onConflict: "driver_line_id"
+      }
     )
     .select()
     .single();
 
-  if (error) {
-    console.error("upsertDriverCurrentOrder error:", error);
-    return null;
-  }
-
+  if (error) throw error;
   return data;
 }
 
@@ -363,12 +316,8 @@ async function getBotSetting(key) {
     .eq("key", key)
     .maybeSingle();
 
-  if (error) {
-    console.error("getBotSetting error:", error);
-    return null;
-  }
-
-  return data?.value || null;
+  if (error) throw error;
+  return data ? data.value : null;
 }
 
 async function setBotSetting(key, value) {
@@ -377,65 +326,17 @@ async function setBotSetting(key, value) {
     .upsert(
       {
         key,
-        value: String(value),
-        updated_at: new Date().toISOString()
-      },
-      { onConflict: "key" }
-    )
-    .select()
-    .single();
-
-  if (error) {
-    console.error("setBotSetting error:", error);
-    return null;
-  }
-
-  return data;
-}
-
-async function getDriverCurrentOrder(driverLineId) {
-  const { data, error } = await supabase
-    .from("driver_current_orders")
-    .select("*")
-    .eq("driver_line_id", driverLineId)
-    .single();
-
-  if (error && error.code !== "PGRST116") {
-    throw error;
-  }
-
-  return data;
-}
-
-async function upsertDriverCurrentOrder({
-  driverLineId,
-  orderId,
-  orderCode,
-  address,
-  plate,
-  status
-}) {
-  const { data, error } = await supabase
-    .from("driver_current_orders")
-    .upsert(
-      {
-        driver_line_id: driverLineId,
-        order_id: orderId,
-        order_code: orderCode,
-        address,
-        plate,
-        status,
+        value,
         updated_at: new Date().toISOString()
       },
       {
-        onConflict: "driver_line_id"
+        onConflict: "key"
       }
     )
     .select()
     .single();
 
   if (error) throw error;
-
   return data;
 }
 
@@ -454,12 +355,8 @@ module.exports = {
   getOpenOrdersForRefresh,
   markOrderRefreshed,
   cancelLatestCustomerOrder,
-
-  // 司機目前訂單系統
   getDriverCurrentOrder,
   upsertDriverCurrentOrder,
-
-  // 系統設定
   getBotSetting,
   setBotSetting
 };
