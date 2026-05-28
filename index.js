@@ -9,6 +9,8 @@ const {
   decideWinner,
   getOrderByCodeAndAddress,
   getLatestCustomerOrder,
+  upsertCustomerPreference,
+  getCustomerPreference,
   resetOrderForReDispatch,
   assignWinnerDriver,
   overrideDriver,
@@ -63,6 +65,32 @@ function getErrorStatus(err) {
 
 function getErrorData(err) {
   return err?.originalError?.response?.data || err.message;
+}
+
+function detectPaymentMethod(text) {
+  const rules = [
+    { keywords: ["客下街口", "下街口", "街口"], value: "客下街口" },
+    { keywords: ["客下轉帳"], value: "客下轉帳" },
+    { keywords: ["轉帳"], value: "轉帳" },
+    { keywords: ["現金"], value: "現金" }
+  ];
+
+  for (const rule of rules) {
+    for (const keyword of rule.keywords) {
+      if (text.includes(keyword)) {
+        return {
+          keyword,
+          value: rule.value
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function removePaymentKeyword(text, keyword) {
+  return text.replace(keyword, "").replace(/\s+/g, " ").trim();
 }
 
 function queuePushMessage(to, message, options = {}) {
@@ -259,13 +287,13 @@ function pushCustomerReservationChanged(customerLineId, reservationTime) {
   );
 }
 
-function pushAskDriverReservationChange(order, reservationTime) {
+function pushAskDriverReservationChange(order, reservationTime, paymentText = "") {
   queuePushMessage(
     DRIVER_GROUP_ID,
     {
       type: "textV2",
       text:
-        `${order.order_code} ${reservationTime} ${order.address}\n` +
+        `${order.order_code} ${reservationTime} ${order.address}${paymentText}\n` +
         "{driver} 可不可更改",
       substitution: {
         driver: {
@@ -356,16 +384,56 @@ async function handleEvent(event) {
   }
 }
 
-async function handleCustomerOrder(event, address) {
-  if (address.startsWith("改預約")) {
-    return handleCustomerChangeToReservation(event, address);
+async function handleCustomerOrder(event, addressText) {
+  const customerLineId = event.source.userId;
+
+  if (addressText === "取消付款設定") {
+    await upsertCustomerPreference(customerLineId, "");
+
+    return replyText(
+      client,
+      event.replyToken,
+      "已取消您的固定付款方式"
+    );
   }
 
-  if (address.length < 3) {
+  const paymentDetected = detectPaymentMethod(addressText);
+
+  if (paymentDetected) {
+    await upsertCustomerPreference(customerLineId, paymentDetected.value);
+
+    const cleanedAddress = removePaymentKeyword(
+      addressText,
+      paymentDetected.keyword
+    );
+
+    if (cleanedAddress.length < 3) {
+      return replyText(
+        client,
+        event.replyToken,
+        `已記住您的付款方式：${paymentDetected.value}`
+      );
+    }
+
+    addressText = cleanedAddress;
+  }
+
+  if (addressText.startsWith("改預約")) {
+    return handleCustomerChangeToReservation(event, addressText);
+  }
+
+  if (addressText.length < 3) {
     return replyText(client, event.replyToken, "請輸入完整地址");
   }
 
-  const order = await createOrder(address, event.source.userId);
+  const order = await createOrder(addressText, customerLineId);
+
+  const preference = await getCustomerPreference(customerLineId);
+
+  const paymentText =
+    preference && preference.payment_method
+      ? ` ${preference.payment_method}`
+      : "";
 
   await replyText(
     client,
@@ -375,7 +443,7 @@ async function handleCustomerOrder(event, address) {
 
   queuePushText(
     DRIVER_GROUP_ID,
-    `${order.order_code} ${order.address}`
+    `${order.order_code} ${order.address}${paymentText}`
   );
 }
 
@@ -398,10 +466,17 @@ async function handleCustomerChangeToReservation(event, text) {
     return replyText(client, event.replyToken, "找不到您目前的訂單");
   }
 
+  const preference = await getCustomerPreference(event.source.userId);
+
+  const paymentText =
+    preference && preference.payment_method
+      ? ` ${preference.payment_method}`
+      : "";
+
   if (order.status !== "assigned" || !order.assigned_driver_line_id) {
     queuePushText(
       DRIVER_GROUP_ID,
-      `${order.order_code} ${reservationTime} ${order.address}`,
+      `${order.order_code} ${reservationTime} ${order.address}${paymentText}`,
       { merge: false }
     );
 
@@ -416,11 +491,12 @@ async function handleCustomerChangeToReservation(event, text) {
     order,
     reservationTime,
     address: order.address,
+    paymentText,
     customerLineId: order.customer_line_id,
     driverLineId: order.assigned_driver_line_id
   });
 
-  pushAskDriverReservationChange(order, reservationTime);
+  pushAskDriverReservationChange(order, reservationTime, paymentText);
 
   return replyText(
     client,
@@ -661,7 +737,7 @@ async function handleReservationDriverReply(event, text) {
 
       queuePushText(
         DRIVER_GROUP_ID,
-        `${pending.order.order_code} ${pending.reservationTime} ${pending.address}`,
+        `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`,
         { merge: false }
       );
 

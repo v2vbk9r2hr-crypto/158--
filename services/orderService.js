@@ -65,6 +65,43 @@ async function getLatestCustomerOrder(customerLineId) {
   return data;
 }
 
+async function upsertCustomerPreference(customerLineId, paymentMethod) {
+  const { data, error } = await supabase
+    .from("customer_preferences")
+    .upsert(
+      {
+        customer_line_id: customerLineId,
+        payment_method: paymentMethod,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "customer_line_id" }
+    )
+    .select()
+    .single();
+
+  if (error) {
+    console.error("upsertCustomerPreference error:", error);
+    return null;
+  }
+
+  return data;
+}
+
+async function getCustomerPreference(customerLineId) {
+  const { data, error } = await supabase
+    .from("customer_preferences")
+    .select("*")
+    .eq("customer_line_id", customerLineId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getCustomerPreference error:", error);
+    return null;
+  }
+
+  return data;
+}
+
 async function addDriverReport({
   orderId,
   orderCode,
@@ -135,9 +172,7 @@ async function decideWinner(orderId) {
     .order("minutes", { ascending: true })
     .order("created_at", { ascending: true });
 
-  if (error || !reports || reports.length === 0) {
-    return null;
-  }
+  if (error || !reports || reports.length === 0) return null;
 
   const winner = reports[0];
 
@@ -256,6 +291,8 @@ module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
   getLatestCustomerOrder,
+  upsertCustomerPreference,
+  getCustomerPreference,
   addDriverReport,
   getFirstDriverReport,
   assignWinnerDriver,
