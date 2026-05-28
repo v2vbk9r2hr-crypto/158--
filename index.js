@@ -34,16 +34,20 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
+// =========================
+// 防 429 Push Queue
+// =========================
+
 const pushQueue = [];
 let isPushSending = false;
 
-const PUSH_GAP_MS = 2500;        // 正常每 2.5 秒送一則
-const MIN_PUSH_GAP_MS = 1800;    // 最快不低於 1.8 秒
-const MAX_PUSH_GAP_MS = 8000;    // 被限流時最高拉到 8 秒
-let currentPushGapMs = PUSH_GAP_MS;
-
+const PUSH_GAP_MS = 2500;
+const MIN_PUSH_GAP_MS = 1800;
+const MAX_PUSH_GAP_MS = 8000;
 const MERGE_WINDOW_MS = 1500;
 const MAX_RETRY = 5;
+
+let currentPushGapMs = PUSH_GAP_MS;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -61,12 +65,16 @@ function getErrorData(err) {
   return err?.originalError?.response?.data || err.message;
 }
 
-function queuePushText(to, text, options = {}) {
-  if (!to || !text) return;
+function queuePushMessage(to, message, options = {}) {
+  if (!to || !message) return;
 
   const now = Date.now();
 
-  if (options.merge !== false && pushQueue.length > 0) {
+  if (
+    options.merge !== false &&
+    message.type === "text" &&
+    pushQueue.length > 0
+  ) {
     const lastJob = pushQueue[pushQueue.length - 1];
 
     if (
@@ -75,22 +83,30 @@ function queuePushText(to, text, options = {}) {
       lastJob.message.type === "text" &&
       now - lastJob.createdAt <= MERGE_WINDOW_MS
     ) {
-      lastJob.message.text += "\n" + text;
+      lastJob.message.text += "\n" + message.text;
       return;
     }
   }
 
   pushQueue.push({
     to,
-    message: {
-      type: "text",
-      text
-    },
+    message,
     retry: 0,
     createdAt: now
   });
 
   processPushQueue();
+}
+
+function queuePushText(to, text, options = {}) {
+  queuePushMessage(
+    to,
+    {
+      type: "text",
+      text
+    },
+    options
+  );
 }
 
 async function processPushQueue() {
@@ -103,9 +119,9 @@ async function processPushQueue() {
 
     try {
       await client.pushMessage(job.to, job.message);
-      console.log("PUSH SEND:", job.message.text);
 
-      // 成功後慢慢降回正常速度
+      console.log("PUSH SEND:", job.message.text || job.message.type);
+
       currentPushGapMs = Math.max(
         MIN_PUSH_GAP_MS,
         currentPushGapMs - 300
@@ -132,7 +148,6 @@ async function processPushQueue() {
       if (status === 429 && job.retry < MAX_RETRY) {
         job.retry += 1;
 
-        // 429 時自動降速
         currentPushGapMs = Math.min(
           MAX_PUSH_GAP_MS,
           currentPushGapMs + 1500
@@ -154,43 +169,9 @@ async function processPushQueue() {
   isPushSending = false;
 }
 
-  while (pushQueue.length > 0) {
-    const job = pushQueue.shift();
-
-    try {
-      await client.pushMessage(job.to, job.message);
-      console.log("PUSH SEND:", job.message.text);
-      await delay(PUSH_GAP_MS);
-    } catch (err) {
-      const status = getErrorStatus(err);
-      const data = getErrorData(err);
-
-      console.error("PUSH ERROR:", data);
-
-      if (
-        data &&
-        typeof data === "object" &&
-        data.message === "You have reached your monthly limit."
-      ) {
-        console.error("LINE 月額度已用完，停止 pushMessage");
-        pushQueue.length = 0;
-        break;
-      }
-
-      if (status === 429 && job.retry < MAX_RETRY) {
-        job.retry += 1;
-        const retryDelay = PUSH_GAP_MS * (job.retry + 2);
-        await delay(retryDelay);
-        pushQueue.unshift(job);
-        continue;
-      }
-
-      await delay(PUSH_GAP_MS);
-    }
-  }
-
-  isPushSending = false;
-}
+// =========================
+// LINE mention
+// =========================
 
 async function replyGroupMention(replyToken, userId, text) {
   try {
@@ -239,6 +220,30 @@ async function replyTwoGroupMentions(replyToken, oldUserId, newUserId) {
   }
 }
 
+function pushGroupWinnerMention(driverLineId) {
+  queuePushMessage(
+    DRIVER_GROUP_ID,
+    {
+      type: "textV2",
+      text: "{driver} 噴",
+      substitution: {
+        driver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: driverLineId
+          }
+        }
+      }
+    },
+    { merge: false }
+  );
+}
+
+// =========================
+// Customer Push
+// =========================
+
 function pushCustomerDispatch(customerLineId, plate, minutes) {
   queuePushText(
     customerLineId,
@@ -254,6 +259,10 @@ function pushCustomerArrived(customerLineId, plate) {
     { merge: false }
   );
 }
+
+// =========================
+// Driver Order
+// =========================
 
 async function rememberDriverOrder({
   driverLineId,
@@ -304,6 +313,10 @@ async function checkDriverCurrentOrderTime({
   return true;
 }
 
+// =========================
+// Routes
+// =========================
+
 app.get("/", (req, res) => {
   res.send("Taxi Dispatch Bot Running - Safe Queue Mode");
 });
@@ -319,6 +332,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     });
   }
 });
+
+// =========================
+// Main Event
+// =========================
 
 async function handleEvent(event) {
   console.log("SOURCE:", event.source);
@@ -347,7 +364,7 @@ async function handleCustomerOrder(event, address) {
   await replyText(
     client,
     event.replyToken,
-    `立即為您派車，請稍等`
+    "立即為您派車，請稍等"
   );
 
   queuePushText(
@@ -529,19 +546,7 @@ async function handleDriverReport(event, text) {
           plate: winner.plate
         });
 
-        await client.pushMessage(DRIVER_GROUP_ID, {
-  type: "textV2",
-  text: "{driver} 噴",
-  substitution: {
-    driver: {
-      type: "mention",
-      mentionee: {
-        type: "user",
-        userId: winner.driver_line_id
-      }
-    }
-  }
-});
+        pushGroupWinnerMention(winner.driver_line_id);
 
         pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -554,6 +559,10 @@ async function handleDriverReport(event, text) {
     }, 10000);
   }
 }
+
+// =========================
+// Start Server
+// =========================
 
 const port = process.env.PORT || 3000;
 
