@@ -1224,6 +1224,11 @@ async function refreshOpenOrders() {
         REFRESH_BATCH_SIZE
       );
 
+      queueRefreshText(
+  DRIVER_GROUP_ID,
+  "🪳---🪳 我是分隔線 🪳---🪳"
+);
+
     for (const order of refreshTargets) {
 
       if (
