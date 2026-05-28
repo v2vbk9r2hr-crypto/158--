@@ -159,11 +159,12 @@ function normalizeReportedAddress(address) {
     .trim();
 }
 
-function addQueue(queue, job) {
-  const totalSize =
-    criticalQueue.length + normalQueue.length + refreshQueue.length;
+function totalQueueSize() {
+  return criticalQueue.length + normalQueue.length + refreshQueue.length;
+}
 
-  if (totalSize >= MAX_QUEUE_SIZE) {
+function addQueue(queue, job) {
+  if (totalQueueSize() >= MAX_QUEUE_SIZE) {
     console.error("QUEUE FULL");
     return;
   }
@@ -173,13 +174,21 @@ function addQueue(queue, job) {
 }
 
 function queueCriticalMessage(to, message, source = "A") {
-  addQueue(criticalQueue, {
+  if (totalQueueSize() >= MAX_QUEUE_SIZE) {
+    console.error("QUEUE FULL");
+    return;
+  }
+
+  criticalQueue.unshift({
     to,
     retry: 0,
     source,
     priority: "critical",
     message
   });
+
+  pauseRefreshUntil = Date.now() + 10 * 1000;
+  processPushQueue();
 }
 
 function queueCriticalText(to, text, source = "A") {
@@ -210,6 +219,7 @@ function queueRefreshText(to, text, source = "A") {
   if (!REFRESH_ENABLED) return;
   if (circuitBreaker) return;
   if (Date.now() < pauseRefreshUntil) return;
+  if (criticalQueue.length > 0) return;
 
   addQueue(refreshQueue, {
     to,
@@ -253,30 +263,16 @@ async function processPushQueue() {
         currentPushGapMs - 300
       );
 
-// ====================================
-// 新單插隊機制
-// ====================================
+      let waitMs = currentPushGapMs;
 
-let waitMs = currentPushGapMs;
+      while (waitMs > 0) {
+        await delay(500);
+        waitMs -= 500;
 
-while (waitMs > 0) {
-
-  // 每500ms檢查一次
-  await delay(500);
-
-  waitMs -= 500;
-
-  // 如果現在正在刷單
-  // 但有新 critical
-  // 立刻中斷等待
-  if (
-    job.priority === "refresh" &&
-    criticalQueue.length > 0
-  ) {
-
-    break;
-  }
-}
+        if (job.priority === "refresh" && criticalQueue.length > 0) {
+          break;
+        }
+      }
     } catch (err) {
       const status = getErrorStatus(err);
       const data = getErrorData(err);
@@ -1112,6 +1108,7 @@ async function refreshOpenOrders() {
   if (!REFRESH_ENABLED) return;
   if (circuitBreaker) return;
   if (Date.now() < pauseRefreshUntil) return;
+  if (criticalQueue.length > 0) return;
 
   try {
     const orders = await getOpenOrdersForRefresh();
@@ -1127,6 +1124,7 @@ async function refreshOpenOrders() {
     );
 
     for (const order of refreshTargets) {
+      if (criticalQueue.length > 0) break;
       if (refreshingOrders.has(order.order_id)) continue;
 
       refreshingOrders.add(order.order_id);
