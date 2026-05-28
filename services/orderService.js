@@ -349,6 +349,43 @@ async function upsertDriverCurrentOrder({
   return data;
 }
 
+async function getBotSetting(key) {
+  const { data, error } = await supabase
+    .from("bot_settings")
+    .select("*")
+    .eq("key", key)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getBotSetting error:", error);
+    return null;
+  }
+
+  return data?.value || null;
+}
+
+async function setBotSetting(key, value) {
+  const { data, error } = await supabase
+    .from("bot_settings")
+    .upsert(
+      {
+        key,
+        value: String(value),
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "key" }
+    )
+    .select()
+    .single();
+
+  if (error) {
+    console.error("setBotSetting error:", error);
+    return null;
+  }
+
+  return data;
+}
+
 module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
@@ -365,5 +402,7 @@ module.exports = {
   markOrderRefreshed,
   cancelLatestCustomerOrder,
   getDriverCurrentOrder,
-  upsertDriverCurrentOrder
+  upsertDriverCurrentOrder,
+  getBotSetting,
+  setBotSetting
 };

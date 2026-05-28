@@ -19,7 +19,9 @@ const {
   overrideDriver,
   getFirstDriverReport,
   getDriverCurrentOrder,
-  upsertDriverCurrentOrder
+  upsertDriverCurrentOrder,
+  getBotSetting,
+  setBotSetting
 } = require("./services/orderService");
 
 const { replyText } = require("./services/lineService");
@@ -44,8 +46,8 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 const GOOGLE_TOLERANCE_MINUTES = 3;
 
-const REFRESH_INTERVAL_MS = 45 * 1000;
-const REFRESH_BATCH_SIZE = 2;
+const REFRESH_INTERVAL_MS = 20 * 1000;
+const REFRESH_BATCH_SIZE = 3;
 
 const pendingReservationChanges = new Map();
 
@@ -56,9 +58,9 @@ const decidingOrders = new Set();
 const pushQueue = [];
 let isPushSending = false;
 
-const PUSH_GAP_MS = 4000;
-const MIN_PUSH_GAP_MS = 3000;
-const MAX_PUSH_GAP_MS = 15000;
+const PUSH_GAP_MS = 2500;
+const MIN_PUSH_GAP_MS = 1800;
+const MAX_PUSH_GAP_MS = 8000;
 const MERGE_WINDOW_MS = 1500;
 const MAX_RETRY = 5;
 
@@ -266,6 +268,26 @@ function pushGroupWinnerMention(driverLineId) {
   );
 }
 
+function pushGroupCancelMention(driverLineId) {
+  queuePushMessage(
+    DRIVER_GROUP_ID,
+    {
+      type: "textV2",
+      text: "{driver} 取",
+      substitution: {
+        driver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: driverLineId
+          }
+        }
+      }
+    },
+    { merge: false }
+  );
+}
+
 function pushCustomerDispatch(customerLineId, plate, minutes) {
   queuePushText(
     customerLineId,
@@ -359,6 +381,9 @@ async function handleBotControl(event, text) {
 
   if (text === "停止機器人運作" || text === "停止") {
     BOT_ENABLED = false;
+
+    await setBotSetting("bot_enabled", "false");
+
     pushQueue.length = 0;
     processingOrders.clear();
     refreshingOrders.clear();
@@ -372,12 +397,17 @@ async function handleBotControl(event, text) {
   if (text === "開始機器人運作" || text === "開始") {
     BOT_ENABLED = true;
 
+    await setBotSetting("bot_enabled", "true");
+
     await replyText(client, event.replyToken, "機器人已開始運作");
     return true;
   }
 
   if (text === "停止刷單") {
     REFRESH_ENABLED = false;
+
+    await setBotSetting("refresh_enabled", "false");
+
     refreshingOrders.clear();
 
     await replyText(client, event.replyToken, "刷單功能已停止");
@@ -387,6 +417,8 @@ async function handleBotControl(event, text) {
   if (text === "開始刷單") {
     REFRESH_ENABLED = true;
 
+    await setBotSetting("refresh_enabled", "true");
+
     await replyText(client, event.replyToken, "刷單功能已開始");
     return true;
   }
@@ -395,7 +427,9 @@ async function handleBotControl(event, text) {
 }
 
 app.get("/", (req, res) => {
-  res.send(`Taxi Dispatch Bot Running - BOT_ENABLED=${BOT_ENABLED}`);
+  res.send(
+    `Taxi Dispatch Bot Running - BOT_ENABLED=${BOT_ENABLED}, REFRESH_ENABLED=${REFRESH_ENABLED}`
+  );
 });
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -421,9 +455,7 @@ async function handleEvent(event) {
   const controlled = await handleBotControl(event, text);
   if (controlled) return;
 
-  if (!BOT_ENABLED) {
-    return;
-  }
+  if (!BOT_ENABLED) return;
 
   if (event.source.type === "user") {
     return handleCustomerOrder(event, text);
@@ -445,64 +477,26 @@ async function handleCustomerOrder(event, addressText) {
     processingOrders.add(customerLineId);
 
     if (
-  addressText === "取消叫車" ||
-  addressText === "取消" ||
-  addressText === "取" ||
-  addressText === "不用車"
-) {
+      addressText === "取消叫車" ||
+      addressText === "取消" ||
+      addressText === "取" ||
+      addressText === "不用車"
+    ) {
+      const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
 
-  const canceledOrder =
-    await cancelLatestCustomerOrder(
-      customerLineId
-    );
+      processingOrders.delete(customerLineId);
 
-  processingOrders.delete(
-    customerLineId
-  );
+      if (!canceledOrder) {
+        return replyText(client, event.replyToken, "目前沒有可取消的訂單");
+      }
 
-  if (!canceledOrder) {
+      if (canceledOrder.assigned_driver_line_id) {
+        pushGroupCancelMention(canceledOrder.assigned_driver_line_id);
+      }
 
-    return replyText(
-      client,
-      event.replyToken,
-      "目前沒有可取消的訂單"
-    );
-  }
+      return replyText(client, event.replyToken, "已為您取消叫車");
+    }
 
-  // =========================
-  // 已有司機時 @司機 取
-  // =========================
-
-  if (
-    canceledOrder.assigned_driver_line_id
-  ) {
-
-    queuePushMessage(
-      DRIVER_GROUP_ID,
-      {
-        type: "textV2",
-        text: "{driver} 取",
-        substitution: {
-          driver: {
-            type: "mention",
-            mentionee: {
-              type: "user",
-              userId:
-                canceledOrder.assigned_driver_line_id
-            }
-          }
-        }
-      },
-      { merge: false }
-    );
-  }
-
-  return replyText(
-    client,
-    event.replyToken,
-    "已為您取消叫車"
-  );
-}
     if (addressText === "取消付款設定") {
       await upsertCustomerPreference(customerLineId, "");
 
@@ -862,7 +856,7 @@ async function handleReservationDriverReply(event, text) {
 }
 
 async function refreshOpenOrders() {
-  if (!BOT_ENABLED) return;
+  if (!BOT_ENABLED || !REFRESH_ENABLED) return;
 
   try {
     const orders = await getOpenOrdersForRefresh();
@@ -872,7 +866,7 @@ async function refreshOpenOrders() {
     const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
 
     for (const order of refreshTargets) {
-      if (!BOT_ENABLED) return;
+      if (!BOT_ENABLED || !REFRESH_ENABLED) return;
 
       if (refreshingOrders.has(order.order_id)) {
         continue;
@@ -906,10 +900,23 @@ async function refreshOpenOrders() {
   }
 }
 
+async function loadBotSettings() {
+  const botEnabled = await getBotSetting("bot_enabled");
+  const refreshEnabled = await getBotSetting("refresh_enabled");
+
+  BOT_ENABLED = botEnabled !== "false";
+  REFRESH_ENABLED = refreshEnabled !== "false";
+
+  console.log("BOT_ENABLED =", BOT_ENABLED);
+  console.log("REFRESH_ENABLED =", REFRESH_ENABLED);
+}
+
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 const port = process.env.PORT || 3000;
 
-app.listen(port, () => {
-  console.log("BOT RUNNING " + port);
+loadBotSettings().then(() => {
+  app.listen(port, () => {
+    console.log("BOT RUNNING " + port);
+  });
 });
