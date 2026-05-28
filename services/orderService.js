@@ -393,6 +393,52 @@ async function setBotSetting(key, value) {
   return data;
 }
 
+async function getDriverCurrentOrder(driverLineId) {
+  const { data, error } = await supabase
+    .from("driver_current_orders")
+    .select("*")
+    .eq("driver_line_id", driverLineId)
+    .single();
+
+  if (error && error.code !== "PGRST116") {
+    throw error;
+  }
+
+  return data;
+}
+
+async function upsertDriverCurrentOrder({
+  driverLineId,
+  orderId,
+  orderCode,
+  address,
+  plate,
+  status
+}) {
+  const { data, error } = await supabase
+    .from("driver_current_orders")
+    .upsert(
+      {
+        driver_line_id: driverLineId,
+        order_id: orderId,
+        order_code: orderCode,
+        address,
+        plate,
+        status,
+        updated_at: new Date().toISOString()
+      },
+      {
+        onConflict: "driver_line_id"
+      }
+    )
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  return data;
+}
+
 module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
@@ -408,8 +454,12 @@ module.exports = {
   getOpenOrdersForRefresh,
   markOrderRefreshed,
   cancelLatestCustomerOrder,
+
+  // 司機目前訂單系統
   getDriverCurrentOrder,
   upsertDriverCurrentOrder,
+
+  // 系統設定
   getBotSetting,
   setBotSetting
 };
