@@ -1,4 +1,3 @@
-```js
 require("dotenv").config();
 
 const express = require("express");
@@ -37,6 +36,7 @@ const configA = {
 
 const clientA = new line.Client(configA);
 
+let configB = null;
 let clientB = null;
 
 const hasLineB =
@@ -44,7 +44,7 @@ const hasLineB =
   !!process.env.LINE_B_CHANNEL_SECRET;
 
 if (hasLineB) {
-  const configB = {
+  configB = {
     channelAccessToken: process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
     channelSecret: process.env.LINE_B_CHANNEL_SECRET
   };
@@ -207,6 +207,7 @@ function queueNormalText(to, text, source = "A") {
 }
 
 function queueRefreshText(to, text, source = "A") {
+  if (!REFRESH_ENABLED) return;
   if (circuitBreaker) return;
   if (Date.now() < pauseRefreshUntil) return;
 
@@ -395,7 +396,11 @@ function pushCustomerArrived(customerLineId, plate, source = "A") {
   queueCriticalText(customerLineId, `車輛已抵達\n車牌:${plate}`, source);
 }
 
-function pushCustomerReservationChanged(customerLineId, reservationTime, source = "A") {
+function pushCustomerReservationChanged(
+  customerLineId,
+  reservationTime,
+  source = "A"
+) {
   queueCriticalText(
     customerLineId,
     `已為您更改為預約單\n預約時間:${reservationTime}`,
@@ -403,7 +408,12 @@ function pushCustomerReservationChanged(customerLineId, reservationTime, source 
   );
 }
 
-function pushAskDriverReservationChange(order, reservationTime, paymentText = "", source = "A") {
+function pushAskDriverReservationChange(
+  order,
+  reservationTime,
+  paymentText = "",
+  source = "A"
+) {
   queueCriticalMessage(
     DRIVER_GROUP_ID,
     {
@@ -591,11 +601,6 @@ app.post("/webhook", line.middleware(configA), async (req, res) => {
 });
 
 if (hasLineB) {
-  const configB = {
-    channelAccessToken: process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
-    channelSecret: process.env.LINE_B_CHANNEL_SECRET
-  };
-
   app.post("/webhook-b", line.middleware(configB), async (req, res) => {
     res.status(200).end();
 
@@ -686,7 +691,11 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       const orderSource = canceledOrder.source_name || source || "A";
 
       if (canceledOrder.assigned_driver_line_id) {
-        queueGroupMention(canceledOrder.assigned_driver_line_id, "取", orderSource);
+        queueGroupMention(
+          canceledOrder.assigned_driver_line_id,
+          "取",
+          orderSource
+        );
       }
 
       const currentFee = cancelFees.get(customerLineId) || 0;
@@ -730,7 +739,12 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
 
     if (addressText.startsWith("改預約")) {
       processingOrders.delete(customerLineId);
-      return handleCustomerChangeToReservation(event, addressText, clientObj, source);
+      return handleCustomerChangeToReservation(
+        event,
+        addressText,
+        clientObj,
+        source
+      );
     }
 
     if (addressText.length < 3) {
@@ -767,7 +781,12 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
   }
 }
 
-async function handleCustomerChangeToReservation(event, text, clientObj, source) {
+async function handleCustomerChangeToReservation(
+  event,
+  text,
+  clientObj,
+  source
+) {
   const parts = text.split(/\s+/);
 
   if (parts.length < 2) {
@@ -955,7 +974,12 @@ async function handleDriverReport(event, text, clientObj, source) {
 
     queueTwoMentions(oldDriverLineId, event.source.userId, orderSource);
 
-    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes, orderSource);
+    pushCustomerDispatch(
+      updatedOrder.customer_line_id,
+      plate,
+      minutes,
+      orderSource
+    );
 
     totalAssigned++;
     return;
@@ -1004,7 +1028,12 @@ async function handleDriverReport(event, text, clientObj, source) {
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
 
-    pushCustomerDispatch(updatedOrder.customer_line_id, plate, minutes, orderSource);
+    pushCustomerDispatch(
+      updatedOrder.customer_line_id,
+      plate,
+      minutes,
+      orderSource
+    );
 
     totalAssigned++;
     return;
@@ -1144,4 +1173,3 @@ loadBotSettings().then(() => {
     console.log("LINE_B_TOKEN exists:", !!process.env.LINE_B_CHANNEL_ACCESS_TOKEN);
   });
 });
-```
