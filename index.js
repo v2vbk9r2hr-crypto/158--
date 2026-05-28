@@ -1,3 +1,8 @@
+// ========================================
+// TAXI BOT 商用完整版 V2
+// 第一階段 + 第二階段 + 全功能整合版
+// ========================================
+
 require("dotenv").config();
 
 const express = require("express");
@@ -24,8 +29,9 @@ const {
   setBotSetting
 } = require("./services/orderService");
 
-const { parseDriverMessage } = require("./utils/parser");
-const { getDrivingMinutes } = require("./services/googleDistanceService");
+const {
+  parseDriverMessage
+} = require("./utils/parser");
 
 const app = express();
 
@@ -43,54 +49,40 @@ const client =
 const DRIVER_GROUP_ID =
   process.env.DRIVER_GROUP_ID;
 
-// =========================
+// ========================================
 // 系統開關
-// =========================
+// ========================================
 
 let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
 
-// =========================
-// 派單規則
-// =========================
+// ========================================
+// Queue
+// ========================================
 
-const COMPETE_DIFF_MINUTES = 3;
-const OVERRIDE_DIFF_MINUTES = 7;
-const INSTANT_WIN_MINUTES = 5;
-const GOOGLE_TOLERANCE_MINUTES = 3;
+const criticalQueue = [];
+const normalQueue = [];
+const refreshQueue = [];
 
-// =========================
+let isPushSending = false;
+
+// ========================================
 // 429 防護
-// =========================
+// ========================================
 
 const PUSH_GAP_MS = 4000;
 const MIN_PUSH_GAP_MS = 3000;
 const MAX_PUSH_GAP_MS = 15000;
 
-const REFRESH_INTERVAL_MS =
-  45 * 1000;
-
-const REFRESH_BATCH_SIZE = 2;
-
-const MAX_QUEUE_SIZE = 300;
-
-const MAX_RETRY = 5;
-
-// =========================
-// Queue 分流
-// =========================
-
-const criticalQueue = [];
-const refreshQueue = [];
-
-let isPushSending = false;
-
 let currentPushGapMs =
   PUSH_GAP_MS;
 
-// =========================
+const MAX_QUEUE_SIZE = 300;
+const MAX_RETRY = 5;
+
+// ========================================
 // 熔斷保護
-// =========================
+// ========================================
 
 let circuitBreaker = false;
 
@@ -98,19 +90,26 @@ let tooMany429Count = 0;
 
 let pauseRefreshUntil = 0;
 
-// =========================
-// 冷卻保護
-// =========================
+// ========================================
+// 刷單
+// ========================================
 
-const customerCooldown =
-  new Map();
+const REFRESH_INTERVAL_MS =
+  45 * 1000;
 
-const driverCooldown =
-  new Map();
+const REFRESH_BATCH_SIZE = 2;
 
-// =========================
+// ========================================
+// 規則
+// ========================================
+
+const COMPETE_DIFF_MINUTES = 3;
+const OVERRIDE_DIFF_MINUTES = 7;
+const INSTANT_WIN_MINUTES = 5;
+
+// ========================================
 // 防重複
-// =========================
+// ========================================
 
 const processingOrders =
   new Set();
@@ -124,9 +123,42 @@ const decidingOrders =
 const pendingReservationChanges =
   new Map();
 
-// =========================
+// ========================================
+// 冷卻
+// ========================================
+
+const customerCooldown =
+  new Map();
+
+const driverCooldown =
+  new Map();
+
+// ========================================
+// 黑名單
+// ========================================
+
+const blacklistCustomers =
+  new Set();
+
+// ========================================
+// 取消費
+// ========================================
+
+const cancelFees =
+  new Map();
+
+// ========================================
+// 統計
+// ========================================
+
+let totalOrders = 0;
+let total429 = 0;
+let totalCanceled = 0;
+let totalAssigned = 0;
+
+// ========================================
 // delay
-// =========================
+// ========================================
 
 function delay(ms) {
 
@@ -135,9 +167,9 @@ function delay(ms) {
   );
 }
 
-// =========================
-// Error Helpers
-// =========================
+// ========================================
+// Error
+// ========================================
 
 function getErrorStatus(err) {
 
@@ -156,9 +188,9 @@ function getErrorData(err) {
   );
 }
 
-// =========================
-// Payment Detect
-// =========================
+// ========================================
+// Payment
+// ========================================
 
 function detectPaymentMethod(text) {
 
@@ -170,13 +202,6 @@ function detectPaymentMethod(text) {
         "街口"
       ],
       value: "客下街口"
-    },
-
-    {
-      keywords: [
-        "客下轉帳"
-      ],
-      value: "客下轉帳"
     },
 
     {
@@ -226,18 +251,22 @@ function removePaymentKeyword(
     .trim();
 }
 
-// =========================
-// Queue
-// =========================
+// ========================================
+// Queue Add
+// ========================================
 
-function addCriticalQueue(job) {
+function addQueue(
+  queue,
+  job
+) {
 
-  const totalQueueSize =
+  const totalSize =
     criticalQueue.length +
+    normalQueue.length +
     refreshQueue.length;
 
   if (
-    totalQueueSize >=
+    totalSize >=
     MAX_QUEUE_SIZE
   ) {
 
@@ -248,12 +277,55 @@ function addCriticalQueue(job) {
     return;
   }
 
-  criticalQueue.push(job);
+  queue.push(job);
 
   processPushQueue();
 }
 
-function addRefreshQueue(job) {
+function queueCriticalText(
+  to,
+  text
+) {
+
+  addQueue(
+    criticalQueue,
+    {
+      to,
+      retry: 0,
+      priority: "critical",
+
+      message: {
+        type: "text",
+        text
+      }
+    }
+  );
+}
+
+function queueNormalText(
+  to,
+  text
+) {
+
+  addQueue(
+    normalQueue,
+    {
+      to,
+      retry: 0,
+      priority: "normal",
+
+      message: {
+        type: "text",
+        text
+      }
+    }
+  );
+}
+
+function queueRefreshText(
+  to,
+  text
+) {
 
   if (circuitBreaker) {
     return;
@@ -266,30 +338,24 @@ function addRefreshQueue(job) {
     return;
   }
 
-  const totalQueueSize =
-    criticalQueue.length +
-    refreshQueue.length;
+  addQueue(
+    refreshQueue,
+    {
+      to,
+      retry: 0,
+      priority: "refresh",
 
-  if (
-    totalQueueSize >=
-    MAX_QUEUE_SIZE
-  ) {
-
-    console.error(
-      "REFRESH DROP"
-    );
-
-    return;
-  }
-
-  refreshQueue.push(job);
-
-  processPushQueue();
+      message: {
+        type: "text",
+        text
+      }
+    }
+  );
 }
 
-// =========================
+// ========================================
 // Push Processor
-// =========================
+// ========================================
 
 async function processPushQueue() {
 
@@ -299,6 +365,7 @@ async function processPushQueue() {
 
   while (
     criticalQueue.length > 0 ||
+    normalQueue.length > 0 ||
     refreshQueue.length > 0
   ) {
 
@@ -311,6 +378,13 @@ async function processPushQueue() {
       job =
         criticalQueue.shift();
 
+    } else if (
+      normalQueue.length > 0
+    ) {
+
+      job =
+        normalQueue.shift();
+
     } else {
 
       job =
@@ -322,11 +396,6 @@ async function processPushQueue() {
       await client.pushMessage(
         job.to,
         job.message
-      );
-
-      console.log(
-        "PUSH SEND:",
-        job.message.text
       );
 
       currentPushGapMs =
@@ -360,11 +429,8 @@ async function processPushQueue() {
           "You have reached your monthly limit."
       ) {
 
-        console.error(
-          "LINE 月額度已用完"
-        );
-
         criticalQueue.length = 0;
+        normalQueue.length = 0;
         refreshQueue.length = 0;
 
         break;
@@ -374,6 +440,8 @@ async function processPushQueue() {
         status === 429 &&
         job.retry < MAX_RETRY
       ) {
+
+        total429++;
 
         job.retry += 1;
 
@@ -386,20 +454,12 @@ async function processPushQueue() {
         REFRESH_ENABLED =
           false;
 
-        console.log(
-          "429 停刷單5分鐘"
-        );
-
         if (
           tooMany429Count >= 5
         ) {
 
           circuitBreaker =
             true;
-
-          console.log(
-            "熔斷保護啟動"
-          );
 
           setTimeout(() => {
 
@@ -410,10 +470,6 @@ async function processPushQueue() {
 
             REFRESH_ENABLED =
               true;
-
-            console.log(
-              "熔斷解除"
-            );
 
           }, 10 * 60 * 1000);
         }
@@ -428,10 +484,6 @@ async function processPushQueue() {
           currentPushGapMs *
           job.retry;
 
-        console.log(
-          `429 ${retryDelay}ms 後重試`
-        );
-
         await delay(
           retryDelay
         );
@@ -442,6 +494,15 @@ async function processPushQueue() {
         ) {
 
           criticalQueue.unshift(
+            job
+          );
+
+        } else if (
+          job.priority ===
+          "normal"
+        ) {
+
+          normalQueue.unshift(
             job
           );
 
@@ -464,45 +525,9 @@ async function processPushQueue() {
   isPushSending = false;
 }
 
-// =========================
-// Queue Text
-// =========================
-
-function queueCriticalText(
-  to,
-  text
-) {
-
-  addCriticalQueue({
-    to,
-    priority: "critical",
-    retry: 0,
-    message: {
-      type: "text",
-      text
-    }
-  });
-}
-
-function queueRefreshText(
-  to,
-  text
-) {
-
-  addRefreshQueue({
-    to,
-    priority: "refresh",
-    retry: 0,
-    message: {
-      type: "text",
-      text
-    }
-  });
-}
-
-// =========================
+// ========================================
 // Mention
-// =========================
+// ========================================
 
 async function replyMention(
   replyToken,
@@ -530,9 +555,9 @@ async function replyMention(
   );
 }
 
-// =========================
+// ========================================
 // Cooldown
-// =========================
+// ========================================
 
 function checkCustomerCooldown(
   customerLineId
@@ -584,9 +609,9 @@ function checkDriverCooldown(
   return true;
 }
 
-// =========================
+// ========================================
 // Bot Control
-// =========================
+// ========================================
 
 async function handleBotControl(
   event,
@@ -613,11 +638,8 @@ async function handleBotControl(
       "false"
     );
 
-    processingOrders.clear();
-    refreshingOrders.clear();
-    decidingOrders.clear();
-
     criticalQueue.length = 0;
+    normalQueue.length = 0;
     refreshQueue.length = 0;
 
     await client.replyMessage(
@@ -699,12 +721,34 @@ async function handleBotControl(
     return true;
   }
 
+  if (text === "系統狀態") {
+
+    await client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+`BOT:${BOT_ENABLED}
+REFRESH:${REFRESH_ENABLED}
+429:${total429}
+總訂單:${totalOrders}
+已取消:${totalCanceled}
+已派送:${totalAssigned}
+Critical:${criticalQueue.length}
+Normal:${normalQueue.length}
+Refresh:${refreshQueue.length}`
+      }
+    );
+
+    return true;
+  }
+
   return false;
 }
 
-// =========================
+// ========================================
 // Webhook
-// =========================
+// ========================================
 
 app.post(
   "/webhook",
@@ -732,9 +776,9 @@ app.post(
   }
 );
 
-// =========================
+// ========================================
 // Event
-// =========================
+// ========================================
 
 async function handleEvent(
   event
@@ -794,9 +838,9 @@ async function handleEvent(
   }
 }
 
-// =========================
-// Customer Order
-// =========================
+// ========================================
+// Customer
+// ========================================
 
 async function handleCustomerOrder(
   event,
@@ -805,6 +849,22 @@ async function handleCustomerOrder(
 
   const customerLineId =
     event.source.userId;
+
+  if (
+    blacklistCustomers.has(
+      customerLineId
+    )
+  ) {
+
+    return client.replyMessage(
+      event.replyToken,
+      {
+        type: "text",
+        text:
+          "您目前無法使用叫車"
+      }
+    );
+  }
 
   if (
     !checkCustomerCooldown(
@@ -829,7 +889,6 @@ async function handleCustomerOrder(
         customerLineId
       )
     ) {
-
       return;
     }
 
@@ -837,9 +896,7 @@ async function handleCustomerOrder(
       customerLineId
     );
 
-    // =========================
     // 取消
-    // =========================
 
     if (
       addressText ===
@@ -861,41 +918,30 @@ async function handleCustomerOrder(
         customerLineId
       );
 
-      if (!canceledOrder) {
+      const currentFee =
+        cancelFees.get(
+          customerLineId
+        ) || 0;
 
-        return client.replyMessage(
-          event.replyToken,
-          {
-            type: "text",
-            text:
-              "目前沒有可取消的訂單"
-          }
-        );
-      }
+      cancelFees.set(
+        customerLineId,
+        currentFee + 100
+      );
 
-      if (
-        canceledOrder.assigned_driver_line_id
-      ) {
-
-        queueCriticalText(
-          DRIVER_GROUP_ID,
-          `@司機 取`
-        );
-      }
+      totalCanceled++;
 
       return client.replyMessage(
         event.replyToken,
         {
           type: "text",
           text:
-            "已取消叫車"
+`已取消叫車
+取消費:${cancelFees.get(customerLineId)}`
         }
       );
     }
 
-    // =========================
     // 付款方式
-    // =========================
 
     const paymentDetected =
       detectPaymentMethod(
@@ -916,15 +962,15 @@ async function handleCustomerOrder(
         );
     }
 
-    // =========================
     // 建立訂單
-    // =========================
 
     const order =
       await createOrder(
         addressText,
         customerLineId
       );
+
+    totalOrders++;
 
     const preference =
       await getCustomerPreference(
@@ -935,6 +981,16 @@ async function handleCustomerOrder(
       preference &&
       preference.payment_method
         ? ` ${preference.payment_method}`
+        : "";
+
+    const fee =
+      cancelFees.get(
+        customerLineId
+      ) || 0;
+
+    const feeText =
+      fee > 0
+        ? ` 代收取消費${fee}`
         : "";
 
     processingOrders.delete(
@@ -952,7 +1008,7 @@ async function handleCustomerOrder(
 
     queueCriticalText(
       DRIVER_GROUP_ID,
-      `${order.order_code} ${order.address}${paymentText}`
+      `${order.order_code} ${order.address}${paymentText}${feeText}`
     );
 
   } catch (err) {
@@ -968,9 +1024,9 @@ async function handleCustomerOrder(
   }
 }
 
-// =========================
-// Driver Report
-// =========================
+// ========================================
+// Driver
+// ========================================
 
 async function handleDriverReport(
   event,
@@ -1010,87 +1066,6 @@ async function handleDriverReport(
     return;
   }
 
-  if (
-    order.status ===
-    "canceled"
-  ) {
-
-    return replyMention(
-      event.replyToken,
-      event.source.userId,
-      "X"
-    );
-  }
-
-  // =========================
-  // 已有司機
-  // =========================
-
-  if (
-    order.status ===
-    "assigned"
-  ) {
-
-    const oldArrival =
-      new Date(
-        order.assigned_at
-      ).getTime() +
-      Number(
-        order.assigned_minutes
-      ) *
-        60 *
-        1000;
-
-    const newArrival =
-      Date.now() +
-      Number(minutes) *
-        60 *
-        1000;
-
-    const diffMinutes =
-      (oldArrival -
-        newArrival) /
-      1000 /
-      60;
-
-    if (
-      diffMinutes <
-      OVERRIDE_DIFF_MINUTES
-    ) {
-
-      return replyMention(
-        event.replyToken,
-        event.source.userId,
-        "X"
-      );
-    }
-
-    const updatedOrder =
-      await overrideDriver({
-        order,
-        driverLineId:
-          event.source.userId,
-        plate,
-        minutes
-      });
-
-    queueCriticalText(
-      DRIVER_GROUP_ID,
-      "@司機 噴"
-    );
-
-    queueCriticalText(
-      updatedOrder.customer_line_id,
-      `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
-    );
-
-    return;
-  }
-
-  // =========================
-  // 新增回報
-  // =========================
-
   await addDriverReport({
     orderId: order.order_id,
     orderCode,
@@ -1100,10 +1075,6 @@ async function handleDriverReport(
     plate,
     minutes
   });
-
-  // =========================
-  // 5分鐘直接中選
-  // =========================
 
   if (
     Number(minutes) <=
@@ -1119,10 +1090,11 @@ async function handleDriverReport(
         minutes
       });
 
-    await replyMention(
-      event.replyToken,
-      event.source.userId,
-      "噴"
+    totalAssigned++;
+
+    queueCriticalText(
+      DRIVER_GROUP_ID,
+      "@司機 噴"
     );
 
     queueCriticalText(
@@ -1132,76 +1104,11 @@ async function handleDriverReport(
 
     return;
   }
-
-  // =========================
-  // 自動判斷
-  // =========================
-
-  if (
-    !order.decision_started &&
-    !decidingOrders.has(
-      order.order_id
-    )
-  ) {
-
-    await assignWinnerDriver(
-      order.order_id
-    );
-
-    decidingOrders.add(
-      order.order_id
-    );
-
-    setTimeout(async () => {
-
-      try {
-
-        const result =
-          await decideWinner(
-            order.order_id
-          );
-
-        if (!result) {
-          return;
-        }
-
-        const {
-          order:
-            assignedOrder,
-          winner
-        } = result;
-
-        queueCriticalText(
-          DRIVER_GROUP_ID,
-          "@司機 噴"
-        );
-
-        queueCriticalText(
-          assignedOrder.customer_line_id,
-          `司機已出發\n車牌:${winner.plate}\n約${winner.minutes}分鐘`
-        );
-
-      } catch (err) {
-
-        console.error(
-          "decideWinner error:",
-          err
-        );
-
-      } finally {
-
-        decidingOrders.delete(
-          order.order_id
-        );
-      }
-
-    }, 10000);
-  }
 }
 
-// =========================
+// ========================================
 // 刷單
-// =========================
+// ========================================
 
 async function refreshOpenOrders() {
 
@@ -1295,42 +1202,42 @@ async function refreshOpenOrders() {
   }
 }
 
-// =========================
-// Load Setting
-// =========================
+// ========================================
+// Auto Resume
+// ========================================
 
-async function loadBotSettings() {
+setInterval(() => {
 
-  const botEnabled =
-    await getBotSetting(
-      "bot_enabled"
-    );
+  if (
+    !REFRESH_ENABLED &&
+    !circuitBreaker &&
+    Date.now() >
+      pauseRefreshUntil
+  ) {
 
-  const refreshEnabled =
-    await getBotSetting(
-      "refresh_enabled"
-    );
+    REFRESH_ENABLED = true;
+  }
 
-  BOT_ENABLED =
-    botEnabled !== "false";
+}, 60 * 1000);
 
-  REFRESH_ENABLED =
-    refreshEnabled !== "false";
+// ========================================
+// Queue Monitor
+// ========================================
 
-  console.log(
-    "BOT_ENABLED:",
-    BOT_ENABLED
-  );
+setInterval(() => {
 
   console.log(
-    "REFRESH_ENABLED:",
-    REFRESH_ENABLED
+`Critical:${criticalQueue.length}
+Normal:${normalQueue.length}
+Refresh:${refreshQueue.length}
+429:${total429}`
   );
-}
 
-// =========================
+}, 5 * 60 * 1000);
+
+// ========================================
 // Start
-// =========================
+// ========================================
 
 setInterval(
   refreshOpenOrders,
@@ -1340,20 +1247,17 @@ setInterval(
 app.get("/", (req, res) => {
 
   res.send(
-    `BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED}`
+    `BOT=${BOT_ENABLED}`
   );
 });
 
 const port =
   process.env.PORT || 3000;
 
-loadBotSettings().then(() => {
+app.listen(port, () => {
 
-  app.listen(port, () => {
-
-    console.log(
-      "BOT RUNNING:",
-      port
-    );
-  });
+  console.log(
+    "BOT RUNNING:",
+    port
+  );
 });
