@@ -37,9 +37,13 @@ const GOOGLE_TOLERANCE_MINUTES = 3;
 const pushQueue = [];
 let isPushSending = false;
 
-const PUSH_GAP_MS = 6000;
-const MERGE_WINDOW_MS = 1200;
-const MAX_RETRY = 3;
+const PUSH_GAP_MS = 2500;        // 正常每 2.5 秒送一則
+const MIN_PUSH_GAP_MS = 1800;    // 最快不低於 1.8 秒
+const MAX_PUSH_GAP_MS = 8000;    // 被限流時最高拉到 8 秒
+let currentPushGapMs = PUSH_GAP_MS;
+
+const MERGE_WINDOW_MS = 1500;
+const MAX_RETRY = 5;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -93,6 +97,62 @@ async function processPushQueue() {
   if (isPushSending) return;
 
   isPushSending = true;
+
+  while (pushQueue.length > 0) {
+    const job = pushQueue.shift();
+
+    try {
+      await client.pushMessage(job.to, job.message);
+      console.log("PUSH SEND:", job.message.text);
+
+      // 成功後慢慢降回正常速度
+      currentPushGapMs = Math.max(
+        MIN_PUSH_GAP_MS,
+        currentPushGapMs - 300
+      );
+
+      await delay(currentPushGapMs);
+
+    } catch (err) {
+      const status = getErrorStatus(err);
+      const data = getErrorData(err);
+
+      console.error("PUSH ERROR:", data);
+
+      if (
+        data &&
+        typeof data === "object" &&
+        data.message === "You have reached your monthly limit."
+      ) {
+        console.error("LINE 月額度已用完，停止 pushMessage");
+        pushQueue.length = 0;
+        break;
+      }
+
+      if (status === 429 && job.retry < MAX_RETRY) {
+        job.retry += 1;
+
+        // 429 時自動降速
+        currentPushGapMs = Math.min(
+          MAX_PUSH_GAP_MS,
+          currentPushGapMs + 1500
+        );
+
+        const retryDelay = currentPushGapMs * job.retry;
+
+        console.log(`429 限流，${retryDelay}ms 後重試`);
+
+        await delay(retryDelay);
+        pushQueue.unshift(job);
+        continue;
+      }
+
+      await delay(currentPushGapMs);
+    }
+  }
+
+  isPushSending = false;
+}
 
   while (pushQueue.length > 0) {
     const job = pushQueue.shift();
