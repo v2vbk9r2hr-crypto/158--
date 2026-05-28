@@ -430,21 +430,64 @@ async function handleCustomerOrder(event, addressText) {
     processingOrders.add(customerLineId);
 
     if (
-      addressText === "取消叫車" ||
-      addressText === "取消" ||
-      addressText === "不用車"
-    ) {
-      const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
+  addressText === "取消叫車" ||
+  addressText === "取消" ||
+  addressText === "取" ||
+  addressText === "不用車"
+) {
 
-      processingOrders.delete(customerLineId);
+  const canceledOrder =
+    await cancelLatestCustomerOrder(
+      customerLineId
+    );
 
-      if (!canceledOrder) {
-        return replyText(client, event.replyToken, "目前沒有可取消的訂單");
-      }
+  processingOrders.delete(
+    customerLineId
+  );
 
-      return replyText(client, event.replyToken, "已為您取消叫車");
-    }
+  if (!canceledOrder) {
 
+    return replyText(
+      client,
+      event.replyToken,
+      "目前沒有可取消的訂單"
+    );
+  }
+
+  // =========================
+  // 已有司機時 @司機 取
+  // =========================
+
+  if (
+    canceledOrder.assigned_driver_line_id
+  ) {
+
+    queuePushMessage(
+      DRIVER_GROUP_ID,
+      {
+        type: "textV2",
+        text: "{driver} 取",
+        substitution: {
+          driver: {
+            type: "mention",
+            mentionee: {
+              type: "user",
+              userId:
+                canceledOrder.assigned_driver_line_id
+            }
+          }
+        }
+      },
+      { merge: false }
+    );
+  }
+
+  return replyText(
+    client,
+    event.replyToken,
+    "已為您取消叫車"
+  );
+}
     if (addressText === "取消付款設定") {
       await upsertCustomerPreference(customerLineId, "");
 
