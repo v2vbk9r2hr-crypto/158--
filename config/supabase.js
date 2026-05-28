@@ -1,14 +1,16 @@
 const { createClient } = require("@supabase/supabase-js");
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseUrl =
+  process.env.SUPABASE_URL ||
+  "https://lkopuejdayouaxyrwq.supabase.co";
 
-console.log("SUPABASE_URL exists:", !!supabaseUrl);
-console.log("SUPABASE_KEY exists:", !!supabaseKey);
+const supabaseKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!supabaseUrl) throw new Error("Missing SUPABASE_URL in cloud Variables");
-if (!supabaseKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY in cloud Variables");
+if (!supabaseKey) {
+  throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+}
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(supabaseUrl.trim(), supabaseKey.trim());
 
 module.exports = supabase;
