@@ -1252,9 +1252,12 @@ async function refreshOpenOrders() {
 
       queueRefreshText(
   DRIVER_GROUP_ID,
-  `----------我是分隔線----------
+  "----------我是分隔線----------"
+);
 
-${order.order_code} ${order.address}${paymentText}`
+queueRefreshText(
+  DRIVER_GROUP_ID,
+  `${order.order_code} ${order.address}${paymentText}`
 );
 
       await markOrderRefreshed(
