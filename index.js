@@ -1,3 +1,4 @@
+```js
 require("dotenv").config();
 
 const express = require("express");
@@ -45,6 +46,10 @@ const REFRESH_INTERVAL_MS = 20 * 1000;
 const REFRESH_BATCH_SIZE = 3;
 
 const pendingReservationChanges = new Map();
+
+const processingOrders = new Set();
+const refreshingOrders = new Set();
+const decidingOrders = new Set();
 
 const pushQueue = [];
 let isPushSending = false;
@@ -383,68 +388,96 @@ async function handleEvent(event) {
 async function handleCustomerOrder(event, addressText) {
   const customerLineId = event.source.userId;
 
-  if (
-    addressText === "取消叫車" ||
-    addressText === "取消" ||
-    addressText === "不用車"
-  ) {
-    const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
-
-    if (!canceledOrder) {
-      return replyText(client, event.replyToken, "目前沒有可取消的訂單");
+  try {
+    if (processingOrders.has(customerLineId)) {
+      return replyText(client, event.replyToken, "系統處理中，請稍等");
     }
 
-    return replyText(client, event.replyToken, "已為您取消叫車");
-  }
+    processingOrders.add(customerLineId);
 
-  if (addressText === "取消付款設定") {
-    await upsertCustomerPreference(customerLineId, "");
-    return replyText(client, event.replyToken, "已取消您的固定付款方式");
-  }
+    if (
+      addressText === "取消叫車" ||
+      addressText === "取消" ||
+      addressText === "不用車"
+    ) {
+      const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
 
-  const paymentDetected = detectPaymentMethod(addressText);
+      processingOrders.delete(customerLineId);
 
-  if (paymentDetected) {
-    await upsertCustomerPreference(customerLineId, paymentDetected.value);
+      if (!canceledOrder) {
+        return replyText(client, event.replyToken, "目前沒有可取消的訂單");
+      }
 
-    const cleanedAddress = removePaymentKeyword(
-      addressText,
-      paymentDetected.keyword
-    );
+      return replyText(client, event.replyToken, "已為您取消叫車");
+    }
 
-    if (cleanedAddress.length < 3) {
-      return replyText(
-        client,
-        event.replyToken,
-        `已記住您的付款方式：${paymentDetected.value}`
+    if (addressText === "取消付款設定") {
+      await upsertCustomerPreference(customerLineId, "");
+
+      processingOrders.delete(customerLineId);
+
+      return replyText(client, event.replyToken, "已取消您的固定付款方式");
+    }
+
+    const paymentDetected = detectPaymentMethod(addressText);
+
+    if (paymentDetected) {
+      await upsertCustomerPreference(customerLineId, paymentDetected.value);
+
+      const cleanedAddress = removePaymentKeyword(
+        addressText,
+        paymentDetected.keyword
       );
+
+      if (cleanedAddress.length < 3) {
+        processingOrders.delete(customerLineId);
+
+        return replyText(
+          client,
+          event.replyToken,
+          `已記住您的付款方式：${paymentDetected.value}`
+        );
+      }
+
+      addressText = cleanedAddress;
     }
 
-    addressText = cleanedAddress;
+    if (addressText.startsWith("改預約")) {
+      processingOrders.delete(customerLineId);
+
+      return handleCustomerChangeToReservation(event, addressText);
+    }
+
+    if (addressText.length < 3) {
+      processingOrders.delete(customerLineId);
+
+      return replyText(client, event.replyToken, "請輸入完整地址");
+    }
+
+    const order = await createOrder(addressText, customerLineId);
+
+    const preference = await getCustomerPreference(customerLineId);
+
+    const paymentText =
+      preference && preference.payment_method
+        ? ` ${preference.payment_method}`
+        : "";
+
+    processingOrders.delete(customerLineId);
+
+    await replyText(client, event.replyToken, "立即為您派車，請稍等");
+
+    queuePushText(
+      DRIVER_GROUP_ID,
+      `${order.order_code} ${order.address}${paymentText}`
+    );
+  } catch (err) {
+    processingOrders.delete(customerLineId);
+
+    console.error("handleCustomerOrder error:", err);
+
+    return replyText(client, event.replyToken, "系統忙碌中");
   }
-
-  if (addressText.startsWith("改預約")) {
-    return handleCustomerChangeToReservation(event, addressText);
-  }
-
-  if (addressText.length < 3) {
-    return replyText(client, event.replyToken, "請輸入完整地址");
-  }
-
-  const order = await createOrder(addressText, customerLineId);
-  const preference = await getCustomerPreference(customerLineId);
-
-  const paymentText =
-    preference && preference.payment_method
-      ? ` ${preference.payment_method}`
-      : "";
-
-  await replyText(client, event.replyToken, "立即為您派車，請稍等");
-
-  queuePushText(
-    DRIVER_GROUP_ID,
-    `${order.order_code} ${order.address}${paymentText}`
-  );
 }
 
 async function handleCustomerChangeToReservation(event, text) {
@@ -653,8 +686,10 @@ async function handleDriverReport(event, text) {
     return;
   }
 
-  if (!order.decision_started) {
+  if (!order.decision_started && !decidingOrders.has(order.order_id)) {
     await assignWinnerDriver(order.order_id);
+
+    decidingOrders.add(order.order_id);
 
     setTimeout(async () => {
       try {
@@ -680,6 +715,8 @@ async function handleDriverReport(event, text) {
         );
       } catch (err) {
         console.error("decideWinner error:", err);
+      } finally {
+        decidingOrders.delete(order.order_id);
       }
     }, 10000);
   }
@@ -736,6 +773,12 @@ async function refreshOpenOrders() {
     const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
 
     for (const order of refreshTargets) {
+      if (refreshingOrders.has(order.order_id)) {
+        continue;
+      }
+
+      refreshingOrders.add(order.order_id);
+
       const preference = await getCustomerPreference(order.customer_line_id);
 
       const paymentText =
@@ -750,9 +793,14 @@ async function refreshOpenOrders() {
       );
 
       await markOrderRefreshed(order.order_id);
+
+      refreshingOrders.delete(order.order_id);
+
       await delay(1000);
     }
   } catch (err) {
+    refreshingOrders.clear();
+
     console.error("refreshOpenOrders error:", err);
   }
 }
@@ -764,3 +812,4 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log("BOT RUNNING " + port);
 });
+```
