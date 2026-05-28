@@ -1,6 +1,6 @@
 // ========================================
-// TAXI BOT 商用完整版 V2
-// 第一階段 + 第二階段 + 全功能整合版
+// TAXI BOT 商用完整版 V3
+// 第一階段 + 第二階段 + 訊息防火牆整合版
 // ========================================
 
 require("dotenv").config();
@@ -48,6 +48,13 @@ const client =
 
 const DRIVER_GROUP_ID =
   process.env.DRIVER_GROUP_ID;
+
+// ========================================
+// 訊息防火牆
+// ========================================
+
+const strictDriverRegex =
+  /^#?[A-Z]\d\/\s+.+\s+[A-Za-z0-9\-]+\s+\d+$/;
 
 // ========================================
 // 系統開關
@@ -532,7 +539,7 @@ async function processPushQueue() {
 async function replyMention(
   replyToken,
   userId,
-  text
+ text
 ) {
 
   return client.replyMessage(
@@ -777,7 +784,7 @@ app.post(
 );
 
 // ========================================
-// Event
+// Event 防火牆版
 // ========================================
 
 async function handleEvent(
@@ -801,37 +808,108 @@ async function handleEvent(
   const text =
     event.message.text.trim();
 
-  const controlled =
-    await handleBotControl(
-      event,
-      text
-    );
-
-  if (controlled) {
+  if (!text) {
     return;
   }
 
-  if (!BOT_ENABLED) {
+  if (text.length < 2) {
     return;
   }
 
-  if (
-    event.source.type ===
-    "user"
-  ) {
-
-    return handleCustomerOrder(
-      event,
-      text
-    );
-  }
+  // ========================================
+  // 群組
+  // ========================================
 
   if (
     event.source.type ===
     "group"
   ) {
 
+    if (
+      event.source.groupId !==
+      DRIVER_GROUP_ID
+    ) {
+
+      return;
+    }
+
+    const controlled =
+      await handleBotControl(
+        event,
+        text
+      );
+
+      if (controlled) {
+      return;
+    }
+
+    if (!BOT_ENABLED) {
+      return;
+    }
+
+    if (
+      !checkDriverCooldown(
+        event.source.userId
+      )
+    ) {
+
+      return;
+    }
+
+    // ========================================
+    // 非 # 開頭忽略
+    // ========================================
+
+    if (
+      !text.startsWith("#")
+    ) {
+
+      console.log(
+        "非搶單訊息忽略:",
+        text
+      );
+
+      return;
+    }
+
+    // ========================================
+    // 非法格式忽略
+    // ========================================
+
+    if (
+      !strictDriverRegex.test(
+        text
+      )
+    ) {
+
+      console.log(
+        "非法格式忽略:",
+        text
+      );
+
+      return;
+    }
+
     return handleDriverReport(
+      event,
+      text
+    );
+  }
+
+  // ========================================
+  // 客人
+  // ========================================
+
+  if (
+    event.source.type ===
+    "user"
+  ) {
+
+    if (!BOT_ENABLED) {
+      return;
+    }
+
+    return handleCustomerOrder(
       event,
       text
     );
@@ -896,7 +974,9 @@ async function handleCustomerOrder(
       customerLineId
     );
 
+    // ========================================
     // 取消
+    // ========================================
 
     if (
       addressText ===
@@ -941,7 +1021,9 @@ async function handleCustomerOrder(
       );
     }
 
+    // ========================================
     // 付款方式
+    // ========================================
 
     const paymentDetected =
       detectPaymentMethod(
@@ -962,7 +1044,9 @@ async function handleCustomerOrder(
         );
     }
 
+    // ========================================
     // 建立訂單
+    // ========================================
 
     const order =
       await createOrder(
@@ -1032,15 +1116,6 @@ async function handleDriverReport(
   event,
   text
 ) {
-
-  if (
-    !checkDriverCooldown(
-      event.source.userId
-    )
-  ) {
-
-    return;
-  }
 
   const parsed =
     parseDriverMessage(text);
