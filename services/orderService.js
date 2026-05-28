@@ -152,7 +152,9 @@ async function getFirstDriverReport(orderId) {
 async function assignWinnerDriver(orderId) {
   const { data, error } = await supabase
     .from("orders")
-    .update({ decision_started: true })
+    .update({
+      decision_started: true
+    })
     .eq("order_id", orderId)
     .select()
     .single();
@@ -173,7 +175,9 @@ async function decideWinner(orderId) {
     .order("minutes", { ascending: true })
     .order("created_at", { ascending: true });
 
-  if (error || !reports || reports.length === 0) return null;
+  if (error || !reports || reports.length === 0) {
+    return null;
+  }
 
   const winner = reports[0];
 
@@ -329,15 +333,18 @@ async function upsertDriverCurrentOrder({
 }) {
   const { data, error } = await supabase
     .from("driver_current_orders")
-    .upsert({
-      driver_line_id: driverLineId,
-      order_id: orderId,
-      order_code: orderCode,
-      address,
-      plate,
-      status,
-      updated_at: new Date().toISOString()
-    })
+    .upsert(
+      {
+        driver_line_id: driverLineId,
+        order_id: orderId,
+        order_code: orderCode,
+        address,
+        plate,
+        status,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "driver_line_id" }
+    )
     .select()
     .single();
 
