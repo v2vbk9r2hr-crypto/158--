@@ -438,7 +438,35 @@ async function processMessageJobs() {
 }
 
 async function recoverPendingWinners() {
-  return;
+  try {
+    const { data: winners, error } = await supabase
+      .from("pending_winners")
+      .select("*")
+      .eq("status", "pending")
+      .limit(10);
+
+    if (error) throw error;
+    if (!winners || winners.length === 0) return;
+
+    for (const winner of winners) {
+      await queueGroupMention(
+        winner.driver_line_id,
+        "噴",
+        winner.order_id,
+        PRIORITY_INSTANT_SPRAY
+      );
+
+      await supabase
+        .from("pending_winners")
+        .update({
+          status: "sent",
+          sent_at: new Date().toISOString()
+        })
+        .eq("id", winner.id);
+    }
+  } catch (err) {
+    console.error("recoverPendingWinners error:", err);
+  }
 }
 
 async function replyText(clientObj, replyToken, text) {
@@ -487,37 +515,47 @@ function checkDriverCooldown(driverLineId) {
 }
 
 function parseStrictDriverMessage(text) {
-  const lines = text
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map(v => v.trim())
-    .filter(Boolean);
+  const clean = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+  const parts = clean.split(" ");
 
-  if (lines.length !== 3) return null;
+  if (parts.length < 4) return null;
 
-  const firstLine = lines[0];
-  const plate = lines[1];
-  const lastLine = lines[2];
+  const orderCode = parts[0];
+  const lastText = parts[parts.length - 1];
+  const plate = parts[parts.length - 2];
+  const address = parts.slice(1, parts.length - 2).join(" ");
 
-  const match = firstLine.match(/^(#[^/]+)\/(.+)$/);
-  if (!match) return null;
+  if (!orderCode.startsWith("#")) return null;
+  if (!address || !plate) return null;
 
-  const orderCode = match[1].trim();
-  const address = match[2].trim();
-
-  const minutesText = lastLine.replace("分鐘", "").replace("分", "").trim();
-  const minutes = Number(minutesText);
+  const minutes = Number(lastText);
 
   if (Number.isFinite(minutes) && minutes > 0) {
-    return { type: "report", orderCode, address, plate, minutes };
+    return {
+      type: "report",
+      orderCode,
+      address,
+      plate,
+      minutes
+    };
   }
 
-  if (["到", "抵達", "到，客直上", "到,客直上"].includes(lastLine)) {
-    return { type: "arrived", orderCode, address, plate };
+  if (["到", "抵達", "到，客直上"].includes(lastText)) {
+    return {
+      type: "arrived",
+      orderCode,
+      address,
+      plate
+    };
   }
 
-  if (["上", "客上", "客人直接上車"].includes(lastLine)) {
-    return { type: "customer_on", orderCode, address, plate };
+  if (["上", "客上", "客人直接上車"].includes(lastText)) {
+    return {
+      type: "customer_on",
+      orderCode,
+      address,
+      plate
+    };
   }
 
   return null;
@@ -876,7 +914,7 @@ async function handleReservationDriverReply(event, text, clientObj) {
 
 async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const parsed = parsedStrict || parseStrictDriverMessage(text);
-  if (!parsed) return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+  if (!parsed) return;
 
   const orderCode = parsed.orderCode;
   const address = normalizeReportedAddress(parsed.address);
@@ -884,10 +922,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const minutes = Number(parsed.minutes);
 
   const order = await getOrderByCodeAndAddress(orderCode, address);
-
-  if (!order) {
-    return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-  }
+  if (!order) return;
 
   const orderSource = order.source_name || "A";
 
@@ -922,9 +957,77 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
+  if (Number(minutes) <= INSTANT_WIN_MINUTES) {
+    try {
+      await addDriverReport({
+        orderId: order.order_id,
+        orderCode,
+        address,
+        driverLineId: event.source.userId,
+        plate,
+        minutes
+      });
+    } catch (err) {
+      if (err.code === "23505") {
+        return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+      }
+      throw err;
+    }
+
+    const oldDriverLineId = order.assigned_driver_line_id || null;
+
+    const updatedOrder = await overrideDriver({
+      order,
+      driverLineId: event.source.userId,
+      plate,
+      minutes
+    });
+
+    await rememberDriverOrder({
+      driverLineId: event.source.userId,
+      order: updatedOrder,
+      orderCode,
+      address,
+      plate
+    });
+
+    await safeAddPendingWinner({
+      orderId: updatedOrder.order_id,
+      orderCode: updatedOrder.order_code,
+      driverLineId: event.source.userId,
+      label: "instant"
+    });
+
+    await queueGroupMention(
+      event.source.userId,
+      "噴",
+      updatedOrder.order_id,
+      PRIORITY_INSTANT_SPRAY
+    );
+
+    if (oldDriverLineId && oldDriverLineId !== event.source.userId) {
+      await queueGroupMention(
+        oldDriverLineId,
+        "X",
+        updatedOrder.order_id,
+        PRIORITY_OVERRIDE_SPRAY
+      );
+    }
+
+    await pushCustomerDispatch(
+      updatedOrder.customer_line_id,
+      plate,
+      minutes,
+      orderSource
+    );
+
+    totalAssigned++;
+    return;
+  }
+
   if (order.status === "assigned") {
     const oldArrival = getArrivalTimeMs(order.assigned_at, order.assigned_minutes);
-    const newArrival = Date.now() + minutes * 60 * 1000;
+    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
     const diffMinutes = (oldArrival - newArrival) / 1000 / 60;
 
     if (diffMinutes < OVERRIDE_DIFF_MINUTES) {
@@ -965,7 +1068,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
   if (firstReport) {
     const firstArrival = getArrivalTimeMs(firstReport.created_at, firstReport.minutes);
-    const newArrival = Date.now() + minutes * 60 * 1000;
+    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
     const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
 
     if (diffMinutes < COMPETE_DIFF_MINUTES) {
@@ -1016,21 +1119,19 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await replyMention(
-  clientObj,
-  event.replyToken,
-  winner.driver_line_id,
-  "噴"
-);
+        await safeAddPendingWinner({
+          orderId: assignedOrder.order_id,
+          orderCode: assignedOrder.order_code,
+          driverLineId: winner.driver_line_id,
+          label: "countdown"
+        });
 
-queueGroupMention(
-  winner.driver_line_id,
-  "噴",
-  assignedOrder.order_id,
-  PRIORITY_COUNTDOWN_SPRAY
-).catch(err => {
-  console.error("queue countdown spray error:", err);
-});
+        await queueGroupMention(
+          winner.driver_line_id,
+          "噴",
+          assignedOrder.order_id,
+          PRIORITY_COUNTDOWN_SPRAY
+        );
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -1048,3 +1149,85 @@ queueGroupMention(
     }, 8000);
   }
 }
+
+async function refreshOpenOrders() {
+  if (!BOT_ENABLED) return;
+  if (!REFRESH_ENABLED) return;
+
+  try {
+    const orders = await getOpenOrdersForRefresh();
+
+    if (!orders || orders.length === 0) return;
+
+    const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
+
+    await queueRefreshText(
+      DRIVER_GROUP_ID,
+      "🪳---🪳 我是分隔線 🪳---🪳",
+      DRIVER_GROUP_SOURCE
+    );
+
+    for (const order of refreshTargets) {
+      if (refreshingOrders.has(order.order_id)) continue;
+
+      refreshingOrders.add(order.order_id);
+
+      const preference = await getCustomerPreference(order.customer_line_id);
+
+      const paymentText =
+        preference && preference.payment_method ? ` ${preference.payment_method}` : "";
+
+      await queueRefreshText(
+        DRIVER_GROUP_ID,
+        `${order.order_code} ${order.address}${paymentText}`,
+        DRIVER_GROUP_SOURCE
+      );
+
+      await markOrderRefreshed(order.order_id);
+
+      refreshingOrders.delete(order.order_id);
+
+      await delay(1000);
+    }
+  } catch (err) {
+    refreshingOrders.clear();
+    console.error("refreshOpenOrders error:", err);
+  }
+}
+
+setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
+setInterval(recoverPendingWinners, 30000);
+setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
+
+setInterval(() => {
+  console.log(
+    `429:${total429}
+GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
+  );
+}, 5 * 60 * 1000);
+
+app.get("/", (req, res) => {
+  res.send(`BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED} GOOGLE=${GOOGLE_API_ENABLED}`);
+});
+
+async function loadBotSettings() {
+  const botEnabled = await getBotSetting("bot_enabled");
+  const refreshEnabled = await getBotSetting("refresh_enabled");
+
+  BOT_ENABLED = botEnabled !== "false";
+  REFRESH_ENABLED = refreshEnabled !== "false";
+}
+
+const port = process.env.PORT || 3000;
+
+loadBotSettings().then(() => {
+  app.listen(port, () => {
+    console.log("BOT RUNNING:", port);
+    console.log("官方A: ON");
+    console.log("官方B:", hasLineB ? "ON" : "OFF");
+    console.log("Supabase message_jobs: ON");
+    console.log("Pending winners recovery: ON");
+    console.log("Priority: 5min > 3min > 7min > 10sec > order > refresh");
+    console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
+  });
+});
