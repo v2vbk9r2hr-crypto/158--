@@ -112,9 +112,6 @@ let total429 = 0;
 let totalCanceled = 0;
 let totalAssigned = 0;
 
-const strictDriverRegex =
-  /^#?[A-Z]\d\/\s+[\s\S]+\s+[\u4e00-\u9fa5A-Za-z0-9\-]+\s+(\d+|到|到了|抵達|客上|上車|完成)\s*$/;
-
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -490,6 +487,49 @@ function parseStrictDriverMessage(text) {
   if (!orderCode.startsWith("#")) return null;
   if (!address || !plate) return null;
 
+  const minutes = Number(lastText);
+
+  if (Number.isFinite(minutes) && minutes > 0) {
+    return {
+      type: "report",
+      orderCode,
+      address,
+      plate,
+      minutes
+    };
+  }
+
+  if (["到", "抵達", "到，客直上"].includes(lastText)) {
+    return {
+      type: "arrived",
+      orderCode,
+      address,
+      plate
+    };
+  }
+
+  if (["上", "客上", "客人直接上車"].includes(lastText)) {
+    return {
+      type: "customer_on",
+      orderCode,
+      address,
+      plate
+    };
+  }
+
+  return null;
+}
+
+  if (parts.length < 4) return null;
+
+  const orderCode = parts[0];
+  const lastText = parts[parts.length - 1];
+  const plate = parts[parts.length - 2];
+  const address = parts.slice(1, parts.length - 2).join(" ");
+
+  if (!orderCode.startsWith("#")) return null;
+  if (!address || !plate) return null;
+
   if (["到", "到了", "抵達"].includes(lastText)) {
     return {
       type: "arrived",
@@ -659,11 +699,11 @@ async function handleEvent(event, clientObj, source) {
 
     if (!text.startsWith("#")) return;
 
-    if (!strictDriverRegex.test(text)) {
-      console.log("非法格式:", text);
-      return;
-    }
-
+  const parsedStrict = parseStrictDriverMessage(text);
+    if (!parsedStrict) {
+  return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+}
+  return handleDriverReport(event, text, clientObj, parsedStrict);
     return handleDriverReport(event, text, clientObj);
   }
 
@@ -892,8 +932,8 @@ async function handleReservationDriverReply(event, text, clientObj) {
   return false;
 }
 
-async function handleDriverReport(event, text, clientObj) {
-  const parsed = parseDriverMessage(text) || parseStrictDriverMessage(text);
+async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
+  const parsed = parsedStrict || parseStrictDriverMessage(text);
   if (!parsed) return;
 
   const orderCode = parsed.orderCode;
@@ -996,6 +1036,7 @@ async function handleDriverReport(event, text, clientObj) {
     }
   }
 
+  try {
   await addDriverReport({
     orderId: order.order_id,
     orderCode,
@@ -1004,6 +1045,13 @@ async function handleDriverReport(event, text, clientObj) {
     plate,
     minutes
   });
+} catch (err) {
+  if (err.code === "23505") {
+    return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+  }
+
+  throw err;
+}
 
   if (Number(minutes) <= INSTANT_WIN_MINUTES) {
     const updatedOrder = await overrideDriver({
