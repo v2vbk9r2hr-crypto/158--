@@ -28,17 +28,9 @@ const {
 
 const app = express();
 
-if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) {
-  throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
-}
-
-if (!process.env.LINE_CHANNEL_SECRET) {
-  throw new Error("Missing LINE_CHANNEL_SECRET");
-}
-
-if (!process.env.DRIVER_GROUP_ID) {
-  throw new Error("Missing DRIVER_GROUP_ID");
-}
+if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
+if (!process.env.LINE_CHANNEL_SECRET) throw new Error("Missing LINE_CHANNEL_SECRET");
+if (!process.env.DRIVER_GROUP_ID) throw new Error("Missing DRIVER_GROUP_ID");
 
 const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
 const DRIVER_GROUP_SOURCE = "A";
@@ -195,6 +187,24 @@ async function enqueueMessage({
   const { error } = jobKey
     ? await query.upsert(payload, { onConflict: "job_key" })
     : await query.insert(payload);
+
+  if (error) throw error;
+}
+
+async function addPendingWinner({ orderId, orderCode, driverLineId }) {
+  const { error } = await supabase
+    .from("pending_winners")
+    .upsert(
+      {
+        order_id: orderId,
+        order_code: orderCode,
+        driver_line_id: driverLineId,
+        status: "pending"
+      },
+      {
+        onConflict: "order_id,driver_line_id"
+      }
+    );
 
   if (error) throw error;
 }
@@ -418,6 +428,37 @@ async function processMessageJobs() {
     }
   } finally {
     messageWorkerRunning = false;
+  }
+}
+
+async function recoverPendingWinners() {
+  try {
+    const { data: winners, error } = await supabase
+      .from("pending_winners")
+      .select("*")
+      .eq("status", "pending")
+      .limit(10);
+
+    if (error) throw error;
+    if (!winners || winners.length === 0) return;
+
+    for (const winner of winners) {
+      await queueGroupMention(
+        winner.driver_line_id,
+        "噴",
+        winner.order_id
+      );
+
+      await supabase
+        .from("pending_winners")
+        .update({
+          status: "sent",
+          sent_at: new Date().toISOString()
+        })
+        .eq("id", winner.id);
+    }
+  } catch (err) {
+    console.error("recoverPendingWinners error:", err);
   }
 }
 
@@ -990,11 +1031,17 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       plate
     });
 
+    await addPendingWinner({
+      orderId: updatedOrder.order_id,
+      orderCode: updatedOrder.order_code,
+      driverLineId: event.source.userId
+    });
+
     await queueGroupMention(
-  event.source.userId,
-  "噴",
-  updatedOrder.order_id
-);
+      event.source.userId,
+      "噴",
+      updatedOrder.order_id
+    );
 
     await pushCustomerDispatch(
       updatedOrder.customer_line_id,
@@ -1033,11 +1080,18 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
+        await addPendingWinner({
+          orderId: assignedOrder.order_id,
+          orderCode: assignedOrder.order_code,
+          driverLineId: winner.driver_line_id
+        });
+
         await queueGroupMention(
-  winner.driver_line_id,
-  "噴",
-  assignedOrder.order_id
-);
+          winner.driver_line_id,
+          "噴",
+          assignedOrder.order_id
+        );
+
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
           winner.plate,
@@ -1101,6 +1155,7 @@ async function refreshOpenOrders() {
 }
 
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
+setInterval(recoverPendingWinners, 30000);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 setInterval(() => {
@@ -1130,6 +1185,7 @@ loadBotSettings().then(() => {
     console.log("官方A: ON");
     console.log("官方B:", hasLineB ? "ON" : "OFF");
     console.log("Supabase message_jobs: ON");
+    console.log("Pending winners recovery: ON");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
