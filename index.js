@@ -20,7 +20,6 @@ const {
   markOrderRefreshed,
   cancelLatestCustomerOrder,
   assignWinnerDriver,
-  overrideDriver,
   upsertDriverCurrentOrder,
   getBotSetting,
   setBotSetting
@@ -39,6 +38,7 @@ const GOOGLE_API_ENABLED = false;
 let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
 
+const COMPETE_DIFF_MINUTES = 3;
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 1;
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
@@ -104,6 +104,10 @@ function getErrorStatus(err) {
 
 function getErrorData(err) {
   return err?.originalError?.response?.data || err.message;
+}
+
+function getArrivalTimeMs(reportTime, minutes) {
+  return new Date(reportTime).getTime() + Number(minutes) * 60 * 1000;
 }
 
 function detectPaymentMethod(text) {
@@ -731,43 +735,17 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
-if (firstReport && firstReport.driver_line_id !== event.source.userId) {
-  const firstArrival = getArrivalTimeMs(firstReport.created_at, firstReport.minutes);
-  const newArrival = Date.now() + minutes * 60 * 1000;
-  const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
+  const firstReport = await getFirstDriverReport(order.order_id);
 
-  if (diffMinutes < COMPETE_DIFF_MINUTES) {
-    return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+  if (firstReport && firstReport.driver_line_id !== event.source.userId) {
+    const firstArrival = getArrivalTimeMs(firstReport.created_at, firstReport.minutes);
+    const newArrival = Date.now() + minutes * 60 * 1000;
+    const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
+
+    if (diffMinutes < COMPETE_DIFF_MINUTES) {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
   }
-}
-
-const firstReport = await getFirstDriverReport(order.order_id);
-
-if (
-  firstReport &&
-  firstReport.driver_line_id !== event.source.userId
-) {
-  const firstArrival =
-    getArrivalTimeMs(
-      firstReport.created_at,
-      firstReport.minutes
-    );
-
-  const newArrival =
-    Date.now() + minutes * 60 * 1000;
-
-  const diffMinutes =
-    (firstArrival - newArrival) / 1000 / 60;
-
-  if (diffMinutes < 3) {
-    return replyMention(
-      clientObj,
-      event.replyToken,
-      event.source.userId,
-      "X"
-    );
-  }
-}
 
   try {
     await addDriverReport({
@@ -814,22 +792,22 @@ if (
         });
 
         try {
-  await getClientBySource(DRIVER_GROUP_SOURCE).pushMessage(DRIVER_GROUP_ID, {
-    type: "textV2",
-    text: "{driver} 噴",
-    substitution: {
-      driver: {
-        type: "mention",
-        mentionee: {
-          type: "user",
-          userId: winner.driver_line_id
+          await getClientBySource(DRIVER_GROUP_SOURCE).pushMessage(DRIVER_GROUP_ID, {
+            type: "textV2",
+            text: "{driver} 噴",
+            substitution: {
+              driver: {
+                type: "mention",
+                mentionee: {
+                  type: "user",
+                  userId: winner.driver_line_id
+                }
+              }
+            }
+          });
+        } catch (err) {
+          console.error("direct spray push error:", err);
         }
-      }
-    }
-  });
-} catch (err) {
-  console.error("direct spray push error:", err);
-}
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
