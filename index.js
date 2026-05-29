@@ -170,15 +170,31 @@ function normalizeReportedAddress(address) {
     .trim();
 }
 
-async function enqueueMessage({ toId, sourceName = "A", priority = 5, message }) {
-  const { error } = await supabase.from("message_jobs").insert({
+async function enqueueMessage({
+  toId,
+  sourceName = "A",
+  priority = 5,
+  message,
+  orderId = null,
+  jobKey = null
+}) {
+  const payload = {
     to_id: toId,
     source_name: sourceName,
     priority,
     message_json: message,
     status: "pending",
-    retry_count: 0
-  });
+    retry_count: 0,
+    next_retry_at: new Date().toISOString(),
+    order_id: orderId,
+    job_key: jobKey
+  };
+
+  const query = supabase.from("message_jobs");
+
+  const { error } = jobKey
+    ? await query.upsert(payload, { onConflict: "job_key" })
+    : await query.insert(payload);
 
   if (error) throw error;
 }
@@ -203,11 +219,13 @@ async function queueRefreshText(to, text, source = "A") {
   });
 }
 
-async function queueGroupMention(userId, text) {
+async function queueGroupMention(userId, text, orderId = null) {
   return enqueueMessage({
     toId: DRIVER_GROUP_ID,
     sourceName: DRIVER_GROUP_SOURCE,
     priority: PRIORITY_DRIVER_SPRAY,
+    orderId,
+    jobKey: orderId ? `spray:${orderId}:${userId}:${text}` : null,
     message: {
       type: "textV2",
       text: "{driver} " + text,
@@ -317,12 +335,23 @@ async function processMessageJobs() {
 
   try {
     const now = new Date().toISOString();
+    const staleTime = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "pending",
+        locked_at: null,
+        error_message: "recovered from stuck processing"
+      })
+      .eq("status", "processing")
+      .lt("locked_at", staleTime);
 
     const { data: jobs, error } = await supabase
       .from("message_jobs")
       .select("*")
       .eq("status", "pending")
-      .or(`locked_at.is.null,locked_at.lt.${now}`)
+      .or(`next_retry_at.is.null,next_retry_at.lte.${now}`)
       .order("priority", { ascending: true })
       .order("created_at", { ascending: true })
       .limit(1);
@@ -355,15 +384,33 @@ async function processMessageJobs() {
       .update({
         status: "sent",
         sent_at: new Date().toISOString(),
+        locked_at: null,
         error_message: null
       })
       .eq("id", claimed.id);
   } catch (err) {
     const status = getErrorStatus(err);
     const data = getErrorData(err);
+
     console.error("processMessageJobs error:", data);
 
     total429 += status === 429 ? 1 : 0;
+
+    const retryDelayMs =
+      status === 429 ? 60 * 1000 : 15 * 1000;
+
+    const nextRetryAt = new Date(Date.now() + retryDelayMs).toISOString();
+
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "pending",
+        locked_at: null,
+        retry_count: supabase.rpc ? undefined : 0,
+        next_retry_at: nextRetryAt,
+        error_message: typeof data === "string" ? data : JSON.stringify(data)
+      })
+      .eq("status", "processing");
   } finally {
     messageWorkerRunning = false;
   }
@@ -977,8 +1024,11 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await queueGroupMention(winner.driver_line_id, "噴");
-
+        await queueGroupMention(
+  winner.driver_line_id,
+  "噴",
+  assignedOrder.order_id
+);
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
           winner.plate,
