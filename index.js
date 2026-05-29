@@ -219,15 +219,6 @@ async function safeAddPendingWinner({ orderId, orderCode, driverLineId, label })
   }
 }
 
-async function queueCriticalText(to, text, source = "A") {
-  return enqueueMessage({
-    toId: to,
-    sourceName: source,
-    priority: PRIORITY_NEW_ORDER,
-    message: { type: "text", text }
-  });
-}
-
 async function queueRefreshText(to, text, source = "A") {
   if (!REFRESH_ENABLED) return;
 
