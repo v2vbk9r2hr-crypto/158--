@@ -438,35 +438,7 @@ async function processMessageJobs() {
 }
 
 async function recoverPendingWinners() {
-  try {
-    const { data: winners, error } = await supabase
-      .from("pending_winners")
-      .select("*")
-      .eq("status", "pending")
-      .limit(10);
-
-    if (error) throw error;
-    if (!winners || winners.length === 0) return;
-
-    for (const winner of winners) {
-      await queueGroupMention(
-        winner.driver_line_id,
-        "噴",
-        winner.order_id,
-        PRIORITY_INSTANT_SPRAY
-      );
-
-      await supabase
-        .from("pending_winners")
-        .update({
-          status: "sent",
-          sent_at: new Date().toISOString()
-        })
-        .eq("id", winner.id);
-    }
-  } catch (err) {
-    console.error("recoverPendingWinners error:", err);
-  }
+  return;
 }
 
 async function replyText(clientObj, replyToken, text) {
@@ -1044,12 +1016,21 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await queueGroupMention(
-          winner.driver_line_id,
-          "噴",
-          assignedOrder.order_id,
-          PRIORITY_COUNTDOWN_SPRAY
-        );
+        await replyMention(
+  clientObj,
+  event.replyToken,
+  winner.driver_line_id,
+  "噴"
+);
+
+queueGroupMention(
+  winner.driver_line_id,
+  "噴",
+  assignedOrder.order_id,
+  PRIORITY_COUNTDOWN_SPRAY
+).catch(err => {
+  console.error("queue countdown spray error:", err);
+});
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
