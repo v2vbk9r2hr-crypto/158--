@@ -527,14 +527,14 @@ function parseStrictDriverMessage(text) {
   const plate = lines[1];
   const lastLine = lines[2];
 
-  const match = firstLine.match(/^(#[A-Za-z0-9]+)\s+(.+)$/);
+  const match = firstLine.match(/^(#[^/]+)\/(.+)$/);
 
   if (!match) return null;
 
-  const orderCode = match[1];
-  const address = match[2];
+  const orderCode = match[1].trim();
+  const address = match[2].trim();
 
-  if (!address || !plate) return null;
+  if (!orderCode || !address || !plate) return null;
 
   const minutesText = lastLine
     .replace("分鐘", "")
