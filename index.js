@@ -516,22 +516,32 @@ function checkDriverCooldown(driverLineId) {
 
 function parseStrictDriverMessage(text) {
   const lines = text
-    .split(/\n+/)
-    .map(line => line.trim())
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map(v => v.trim())
     .filter(Boolean);
 
-  if (lines.length !== 4) return null;
+  if (lines.length !== 3) return null;
 
-  const orderCode = lines[0];
-  const address = lines[1];
-  const plate = lines[2];
-  const lastText = lines[3];
+  const firstLine = lines[0];
+  const plate = lines[1];
+  const lastLine = lines[2];
 
-  if (!orderCode.startsWith("#")) return null;
-  if (!address) return null;
-  if (!plate) return null;
+  const match = firstLine.match(/^(#[A-Za-z0-9]+)\s+(.+)$/);
 
-  const minutes = Number(lastText);
+  if (!match) return null;
+
+  const orderCode = match[1];
+  const address = match[2];
+
+  if (!address || !plate) return null;
+
+  const minutesText = lastLine
+    .replace("分鐘", "")
+    .replace("分", "")
+    .trim();
+
+  const minutes = Number(minutesText);
 
   if (Number.isFinite(minutes) && minutes > 0) {
     return {
@@ -543,7 +553,7 @@ function parseStrictDriverMessage(text) {
     };
   }
 
-  if (["到", "抵達", "到，客直上"].includes(lastText)) {
+  if (["到", "抵達", "到，客直上", "到,客直上"].includes(lastLine)) {
     return {
       type: "arrived",
       orderCode,
@@ -552,7 +562,7 @@ function parseStrictDriverMessage(text) {
     };
   }
 
-  if (["上", "客上", "客人直接上車"].includes(lastText)) {
+  if (["上", "客上", "客人直接上車"].includes(lastLine)) {
     return {
       type: "customer_on",
       orderCode,
