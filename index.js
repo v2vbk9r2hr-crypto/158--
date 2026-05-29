@@ -985,7 +985,11 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       plate
     });
 
-    await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+    await queueGroupMention(
+  event.source.userId,
+  "噴",
+  updatedOrder.order_id
+);
 
     await pushCustomerDispatch(
       updatedOrder.customer_line_id,
