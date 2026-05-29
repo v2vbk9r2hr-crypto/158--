@@ -1155,7 +1155,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       } finally {
         decidingOrders.delete(order.order_id);
       }
-    }, 10000);
+    }, 8000);
   }
 }
 
