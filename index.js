@@ -854,7 +854,8 @@ async function handleReservationDriverReply(event, text, clientObj) {
 
 async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const parsed = parsedStrict || parseStrictDriverMessage(text);
-  if (!parsed) return;
+
+  if (!parsed) return replyMention(clientObj, event.replyToken, event.source.userId, "X");
 
   const orderCode = parsed.orderCode;
   const address = normalizeReportedAddress(parsed.address);
@@ -862,7 +863,8 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const minutes = Number(parsed.minutes);
 
   const order = await getOrderByCodeAndAddress(orderCode, address);
-  if (!order) return;
+
+  if (!order) return replyMention(clientObj, event.replyToken, event.source.userId, "X");
 
   const orderSource = order.source_name || "A";
 
@@ -896,61 +898,10 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
     return;
   }
-  
-    const oldDriverLineId = order.assigned_driver_line_id || null;
-
-    const updatedOrder = await overrideDriver({
-      order,
-      driverLineId: event.source.userId,
-      plate,
-      minutes
-    });
-
-    await rememberDriverOrder({
-      driverLineId: event.source.userId,
-      order: updatedOrder,
-      orderCode,
-      address,
-      plate
-    });
-
-    await safeAddPendingWinner({
-      orderId: updatedOrder.order_id,
-      orderCode: updatedOrder.order_code,
-      driverLineId: event.source.userId,
-      label: "instant"
-    });
-
-    await queueGroupMention(
-      event.source.userId,
-      "噴",
-      updatedOrder.order_id,
-      PRIORITY_INSTANT_SPRAY
-    );
-
-    if (oldDriverLineId && oldDriverLineId !== event.source.userId) {
-      await queueGroupMention(
-        oldDriverLineId,
-        "X",
-        updatedOrder.order_id,
-        PRIORITY_OVERRIDE_SPRAY
-      );
-    }
-
-    await pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      minutes,
-      orderSource
-    );
-
-    totalAssigned++;
-    return;
-  }
 
   if (order.status === "assigned") {
     const oldArrival = getArrivalTimeMs(order.assigned_at, order.assigned_minutes);
-    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
+    const newArrival = Date.now() + minutes * 60 * 1000;
     const diffMinutes = (oldArrival - newArrival) / 1000 / 60;
 
     if (diffMinutes < OVERRIDE_DIFF_MINUTES) {
@@ -991,7 +942,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
   if (firstReport) {
     const firstArrival = getArrivalTimeMs(firstReport.created_at, firstReport.minutes);
-    const newArrival = Date.now() + Number(minutes) * 60 * 1000;
+    const newArrival = Date.now() + minutes * 60 * 1000;
     const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
 
     if (diffMinutes < COMPETE_DIFF_MINUTES) {
@@ -1040,13 +991,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           orderCode: winner.order_code,
           address: winner.address,
           plate: winner.plate
-        });
-
-        await safeAddPendingWinner({
-          orderId: assignedOrder.order_id,
-          orderCode: assignedOrder.order_code,
-          driverLineId: winner.driver_line_id,
-          label: "countdown"
         });
 
         await queueGroupMention(
@@ -1119,7 +1063,6 @@ async function refreshOpenOrders() {
 }
 
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
-// setInterval(recoverPendingWinners, 30000);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 setInterval(() => {
@@ -1151,5 +1094,5 @@ loadBotSettings().then(() => {
     console.log("Supabase message_jobs: ON");
     console.log("Priority: countdown > order > refresh");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
-      });
+  });
 });
