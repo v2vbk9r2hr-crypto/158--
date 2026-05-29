@@ -49,9 +49,20 @@ const REFRESH_BATCH_SIZE = 1;
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
 
-const PRIORITY_DRIVER_SPRAY = 1;
-const PRIORITY_NEW_ORDER = 2;
+/*
+優先級：
+1 = 5分鐘秒噴
+2 = 7分鐘覆蓋噴 / 取
+3 = 客人重要通知
+4 = 倒數10秒噴
+5 = 新單報單
+9 = 刷單
+*/
+const PRIORITY_INSTANT_SPRAY = 1;
+const PRIORITY_OVERRIDE_SPRAY = 2;
 const PRIORITY_CUSTOMER = 3;
+const PRIORITY_COUNTDOWN_SPRAY = 4;
+const PRIORITY_NEW_ORDER = 5;
 const PRIORITY_REFRESH = 9;
 
 const clients = new Map();
@@ -229,11 +240,16 @@ async function queueRefreshText(to, text, source = "A") {
   });
 }
 
-async function queueGroupMention(userId, text, orderId = null) {
+async function queueGroupMention(
+  userId,
+  text,
+  orderId = null,
+  priority = PRIORITY_COUNTDOWN_SPRAY
+) {
   return enqueueMessage({
     toId: DRIVER_GROUP_ID,
     sourceName: DRIVER_GROUP_SOURCE,
-    priority: PRIORITY_DRIVER_SPRAY,
+    priority,
     orderId,
     jobKey: orderId ? `spray:${orderId}:${userId}:${text}` : null,
     message: {
@@ -256,7 +272,7 @@ async function queueTwoMentions(oldUserId, newUserId) {
   return enqueueMessage({
     toId: DRIVER_GROUP_ID,
     sourceName: DRIVER_GROUP_SOURCE,
-    priority: PRIORITY_DRIVER_SPRAY,
+    priority: PRIORITY_OVERRIDE_SPRAY,
     message: {
       type: "textV2",
       text: "{oldDriver} X\n{newDriver} 噴",
@@ -446,7 +462,8 @@ async function recoverPendingWinners() {
       await queueGroupMention(
         winner.driver_line_id,
         "噴",
-        winner.order_id
+        winner.order_id,
+        PRIORITY_INSTANT_SPRAY
       );
 
       await supabase
@@ -720,7 +737,12 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       }
 
       if (canceledOrder.assigned_driver_line_id) {
-        await queueGroupMention(canceledOrder.assigned_driver_line_id, "取");
+        await queueGroupMention(
+          canceledOrder.assigned_driver_line_id,
+          "取",
+          canceledOrder.order_id,
+          PRIORITY_OVERRIDE_SPRAY
+        );
       }
 
       const currentFee = cancelFees.get(customerLineId) || 0;
@@ -773,7 +795,6 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
     totalOrders++;
 
     const preference = await getCustomerPreference(customerLineId);
-
     const paymentText =
       preference && preference.payment_method ? ` ${preference.payment_method}` : "";
 
@@ -816,7 +837,6 @@ async function handleCustomerChangeToReservation(event, text, clientObj) {
 
   const orderSource = order.source_name || "A";
   const preference = await getCustomerPreference(event.source.userId);
-
   const paymentText =
     preference && preference.payment_method ? ` ${preference.payment_method}` : "";
 
@@ -947,6 +967,94 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
+  /*
+  最高優先：5分鐘秒噴。
+  放在3分鐘條件與7分鐘條件之前。
+  */
+  if (Number(minutes) <= INSTANT_WIN_MINUTES) {
+    try {
+      await addDriverReport({
+        orderId: order.order_id,
+        orderCode,
+        address,
+        driverLineId: event.source.userId,
+        plate,
+        minutes
+      });
+    } catch (err) {
+      if (err.code === "23505") {
+        return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+      }
+      throw err;
+    }
+
+    const oldDriverLineId = order.assigned_driver_line_id || null;
+
+    const updatedOrder = await overrideDriver({
+      order,
+      driverLineId: event.source.userId,
+      plate,
+      minutes
+    });
+
+    await rememberDriverOrder({
+      driverLineId: event.source.userId,
+      order: updatedOrder,
+      orderCode,
+      address,
+      plate
+    });
+
+    await queueGroupMention(
+      event.source.userId,
+      "噴",
+      updatedOrder.order_id,
+      PRIORITY_INSTANT_SPRAY
+    );
+
+    await supabase
+  .from("pending_winners")
+  .update({
+    status: "sent",
+    sent_at: new Date().toISOString()
+  })
+  .eq("order_id", updatedOrder.order_id)
+  .eq("driver_line_id", event.source.userId);
+
+    if (oldDriverLineId && oldDriverLineId !== event.source.userId) {
+      await queueGroupMention(
+        oldDriverLineId,
+        "X",
+        updatedOrder.order_id,
+        PRIORITY_OVERRIDE_SPRAY
+      );
+    }
+
+    try {
+      await addPendingWinner({
+        orderId: updatedOrder.order_id,
+        orderCode: updatedOrder.order_code,
+        driverLineId: event.source.userId
+      });
+    } catch (err) {
+      console.error("addPendingWinner instant error:", err);
+    }
+
+    await pushCustomerDispatch(
+      updatedOrder.customer_line_id,
+      plate,
+      minutes,
+      orderSource
+    );
+
+    totalAssigned++;
+    return;
+  }
+
+  /*
+  已派單後：7分鐘覆蓋規則。
+  5分鐘秒噴已經在前面處理，所以這裡處理非5分鐘的覆蓋。
+  */
   if (order.status === "assigned") {
     const oldArrival = getArrivalTimeMs(order.assigned_at, order.assigned_minutes);
     const newArrival = Date.now() + Number(minutes) * 60 * 1000;
@@ -986,6 +1094,9 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
+  /*
+  未派單競爭：3分鐘條件。
+  */
   const firstReport = await getFirstDriverReport(order.order_id);
 
   if (firstReport) {
@@ -1015,45 +1126,9 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     throw err;
   }
 
-  if (Number(minutes) <= INSTANT_WIN_MINUTES) {
-    const updatedOrder = await overrideDriver({
-      order,
-      driverLineId: event.source.userId,
-      plate,
-      minutes
-    });
-
-    await rememberDriverOrder({
-      driverLineId: event.source.userId,
-      order: updatedOrder,
-      orderCode,
-      address,
-      plate
-    });
-
-    await addPendingWinner({
-      orderId: updatedOrder.order_id,
-      orderCode: updatedOrder.order_code,
-      driverLineId: event.source.userId
-    });
-
-    await queueGroupMention(
-      event.source.userId,
-      "噴",
-      updatedOrder.order_id
-    );
-
-    await pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      minutes,
-      orderSource
-    );
-
-    totalAssigned++;
-    return;
-  }
-
+  /*
+  倒數10秒噴。
+  */
   if (!order.decision_started && !decidingOrders.has(order.order_id)) {
     await assignWinnerDriver(order.order_id);
 
@@ -1080,17 +1155,31 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await addPendingWinner({
-          orderId: assignedOrder.order_id,
-          orderCode: assignedOrder.order_code,
-          driverLineId: winner.driver_line_id
-        });
-
         await queueGroupMention(
           winner.driver_line_id,
           "噴",
-          assignedOrder.order_id
+          assignedOrder.order_id,
+          PRIORITY_COUNTDOWN_SPRAY
         );
+
+        await supabase
+  .from("pending_winners")
+  .update({
+    status: "sent",
+    sent_at: new Date().toISOString()
+  })
+  .eq("order_id", assignedOrder.order_id)
+  .eq("driver_line_id", winner.driver_line_id);
+
+        try {
+          await addPendingWinner({
+            orderId: assignedOrder.order_id,
+            orderCode: assignedOrder.order_code,
+            driverLineId: winner.driver_line_id
+          });
+        } catch (err) {
+          console.error("addPendingWinner countdown error:", err);
+        }
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -1105,7 +1194,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       } finally {
         decidingOrders.delete(order.order_id);
       }
-    }, 8000);
+    }, 10000);
   }
 }
 
@@ -1186,6 +1275,7 @@ loadBotSettings().then(() => {
     console.log("官方B:", hasLineB ? "ON" : "OFF");
     console.log("Supabase message_jobs: ON");
     console.log("Pending winners recovery: ON");
+    console.log("Priority: 5min > 3min > 7min > 10sec > order > refresh");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
