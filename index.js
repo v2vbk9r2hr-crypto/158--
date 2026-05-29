@@ -515,18 +515,21 @@ function checkDriverCooldown(driverLineId) {
 }
 
 function parseStrictDriverMessage(text) {
-  const clean = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-  const parts = clean.split(" ");
+  const lines = text
+    .split(/\n+/)
+    .map(line => line.trim())
+    .filter(Boolean);
 
-  if (parts.length < 4) return null;
+  if (lines.length !== 4) return null;
 
-  const orderCode = parts[0];
-  const lastText = parts[parts.length - 1];
-  const plate = parts[parts.length - 2];
-  const address = parts.slice(1, parts.length - 2).join(" ");
+  const orderCode = lines[0];
+  const address = lines[1];
+  const plate = lines[2];
+  const lastText = lines[3];
 
   if (!orderCode.startsWith("#")) return null;
-  if (!address || !plate) return null;
+  if (!address) return null;
+  if (!plate) return null;
 
   const minutes = Number(lastText);
 
