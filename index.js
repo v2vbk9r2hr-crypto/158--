@@ -76,11 +76,11 @@ const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 const INSTANT_WIN_MINUTES = 5;
 
-const REFRESH_INTERVAL_MS = 45 * 1000;
-const REFRESH_BATCH_SIZE = 3;
+const REFRESH_INTERVAL_MS = 60000;
+const REFRESH_BATCH_SIZE = 1;
 
-const PUSH_GAP_MS = 4000;
-const MIN_PUSH_GAP_MS = 3000;
+const PUSH_GAP_MS = 2500;
+const MIN_PUSH_GAP_MS = 2000;
 const MAX_PUSH_GAP_MS = 15000;
 const MAX_QUEUE_SIZE = 300;
 const MAX_RETRY = 5;
@@ -198,7 +198,7 @@ function queueCriticalMessage(to, message, source = "A") {
     message
   });
 
-  pauseRefreshUntil = Date.now() + 10 * 1000;
+  pauseRefreshUntil = Date.now() + 20 * 1000;
   processPushQueue();
 }
 
@@ -1060,7 +1060,10 @@ async function handleDriverReport(event, text, clientObj) {
           plate: winner.plate
         });
 
-        queueGroupMention(winner.driver_line_id, "噴");
+        await addPendingWinner({
+          orderId: order.order_id,
+          driverId: winner.driver_line_id
+        });
 
         pushCustomerDispatch(
           assignedOrder.customer_line_id,
@@ -1075,7 +1078,7 @@ async function handleDriverReport(event, text, clientObj) {
       } finally {
         decidingOrders.delete(order.order_id);
       }
-    }, 10000);
+    }, 8000);
   }
 }
 
