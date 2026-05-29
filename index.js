@@ -333,6 +333,8 @@ async function processMessageJobs() {
   if (messageWorkerRunning) return;
   messageWorkerRunning = true;
 
+  let claimed = null;
+
   try {
     const now = new Date().toISOString();
     const staleTime = new Date(Date.now() - 2 * 60 * 1000).toISOString();
@@ -361,7 +363,7 @@ async function processMessageJobs() {
 
     const job = jobs[0];
 
-    const { data: claimed, error: claimError } = await supabase
+    const { data, error: claimError } = await supabase
       .from("message_jobs")
       .update({
         status: "processing",
@@ -373,7 +375,9 @@ async function processMessageJobs() {
       .maybeSingle();
 
     if (claimError) throw claimError;
-    if (!claimed) return;
+    if (!data) return;
+
+    claimed = data;
 
     const targetClient = getClientBySource(claimed.source_name);
 
@@ -396,21 +400,22 @@ async function processMessageJobs() {
 
     total429 += status === 429 ? 1 : 0;
 
-    const retryDelayMs =
-      status === 429 ? 60 * 1000 : 15 * 1000;
+    if (claimed) {
+      const currentRetry = Number(claimed.retry_count || 0) + 1;
+      const retryDelayMs = status === 429 ? 60 * 1000 : 15 * 1000;
+      const nextRetryAt = new Date(Date.now() + retryDelayMs).toISOString();
 
-    const nextRetryAt = new Date(Date.now() + retryDelayMs).toISOString();
-
-    await supabase
-      .from("message_jobs")
-      .update({
-        status: "pending",
-        locked_at: null,
-        retry_count: supabase.rpc ? undefined : 0,
-        next_retry_at: nextRetryAt,
-        error_message: typeof data === "string" ? data : JSON.stringify(data)
-      })
-      .eq("status", "processing");
+      await supabase
+        .from("message_jobs")
+        .update({
+          status: currentRetry >= MAX_RETRY ? "failed" : "pending",
+          locked_at: null,
+          retry_count: currentRetry,
+          next_retry_at: nextRetryAt,
+          error_message: typeof data === "string" ? data : JSON.stringify(data)
+        })
+        .eq("id", claimed.id);
+    }
   } finally {
     messageWorkerRunning = false;
   }
