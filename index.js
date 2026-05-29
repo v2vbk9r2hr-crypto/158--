@@ -896,24 +896,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
     return;
   }
-
-  if (Number(minutes) <= INSTANT_WIN_MINUTES) {
-    try {
-      await addDriverReport({
-        orderId: order.order_id,
-        orderCode,
-        address,
-        driverLineId: event.source.userId,
-        plate,
-        minutes
-      });
-    } catch (err) {
-      if (err.code === "23505") {
-        return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-      }
-      throw err;
-    }
-
+  
     const oldDriverLineId = order.assigned_driver_line_id || null;
 
     const updatedOrder = await overrideDriver({
