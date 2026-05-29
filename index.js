@@ -3,6 +3,9 @@ require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
 
+let supabaseModule = require("./config/supabase");
+const supabase = supabaseModule.supabase || supabaseModule;
+
 const {
   createOrder,
   addDriverReport,
@@ -23,8 +26,6 @@ const {
   setBotSetting
 } = require("./services/orderService");
 
-const { parseDriverMessage } = require("./utils/parser");
-
 const app = express();
 
 if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) {
@@ -43,32 +44,6 @@ const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
 const DRIVER_GROUP_SOURCE = "A";
 const GOOGLE_API_ENABLED = false;
 
-const configA = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET
-};
-
-const clientA = new line.Client(configA);
-
-let configB = null;
-let clientB = null;
-
-const hasLineB =
-  !!process.env.LINE_B_CHANNEL_ACCESS_TOKEN &&
-  !!process.env.LINE_B_CHANNEL_SECRET;
-
-if (hasLineB) {
-  configB = {
-    channelAccessToken: process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
-    channelSecret: process.env.LINE_B_CHANNEL_SECRET
-  };
-
-  clientB = new line.Client(configB);
-  console.log("官方B 已啟用");
-} else {
-  console.log("官方B 尚未啟用");
-}
-
 let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
 
@@ -79,27 +54,19 @@ const INSTANT_WIN_MINUTES = 5;
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 1;
 
-const PUSH_GAP_MS = 2500;
-const MIN_PUSH_GAP_MS = 2000;
-const MAX_PUSH_GAP_MS = 15000;
-const MAX_QUEUE_SIZE = 300;
+const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
 
-let currentPushGapMs = PUSH_GAP_MS;
-let isPushSending = false;
+const PRIORITY_DRIVER_SPRAY = 1;
+const PRIORITY_NEW_ORDER = 2;
+const PRIORITY_CUSTOMER = 3;
+const PRIORITY_REFRESH = 9;
 
-let circuitBreaker = false;
-let tooMany429Count = 0;
-let pauseRefreshUntil = 0;
-
-const criticalQueue = [];
-const normalQueue = [];
-const refreshQueue = [];
-
+const clients = new Map();
+const pendingReservationChanges = new Map();
 const processingOrders = new Set();
 const refreshingOrders = new Set();
 const decidingOrders = new Set();
-const pendingReservationChanges = new Map();
 
 const customerCooldown = new Map();
 const driverCooldown = new Map();
@@ -111,14 +78,50 @@ let totalOrders = 0;
 let total429 = 0;
 let totalCanceled = 0;
 let totalAssigned = 0;
+let messageWorkerRunning = false;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function getClientBySource(source) {
-  if (source === "B" && clientB) return clientB;
-  return clientA;
+function registerClient(sourceName, channelAccessToken, channelSecret) {
+  const config = { channelAccessToken, channelSecret };
+
+  clients.set(sourceName, {
+    client: new line.Client(config),
+    config
+  });
+
+  return config;
+}
+
+function getClientBySource(sourceName) {
+  const item = clients.get(sourceName);
+  if (!item) throw new Error(`Unknown LINE source: ${sourceName}`);
+  return item.client;
+}
+
+const configA = registerClient(
+  "A",
+  process.env.LINE_CHANNEL_ACCESS_TOKEN,
+  process.env.LINE_CHANNEL_SECRET
+);
+
+const hasLineB =
+  !!process.env.LINE_B_CHANNEL_ACCESS_TOKEN &&
+  !!process.env.LINE_B_CHANNEL_SECRET;
+
+let configB = null;
+
+if (hasLineB) {
+  configB = registerClient(
+    "B",
+    process.env.LINE_B_CHANNEL_ACCESS_TOKEN,
+    process.env.LINE_B_CHANNEL_SECRET
+  );
+  console.log("官方B 已啟用");
+} else {
+  console.log("官方B 尚未啟用");
 }
 
 function getErrorStatus(err) {
@@ -167,164 +170,203 @@ function normalizeReportedAddress(address) {
     .trim();
 }
 
-function totalQueueSize() {
-  return criticalQueue.length + normalQueue.length + refreshQueue.length;
-}
-
-function addQueue(queue, job) {
-  if (totalQueueSize() >= MAX_QUEUE_SIZE) {
-    console.error("QUEUE FULL");
-    return;
-  }
-
-  queue.push(job);
-  processPushQueue();
-}
-
-function queueCriticalMessage(to, message, source = "A") {
-  if (totalQueueSize() >= MAX_QUEUE_SIZE) {
-    console.error("QUEUE FULL");
-    return;
-  }
-
-  criticalQueue.unshift({
-    to,
-    retry: 0,
-    source,
-    priority: "critical",
-    message
+async function enqueueMessage({ toId, sourceName = "A", priority = 5, message }) {
+  const { error } = await supabase.from("message_jobs").insert({
+    to_id: toId,
+    source_name: sourceName,
+    priority,
+    message_json: message,
+    status: "pending",
+    retry_count: 0
   });
 
-  pauseRefreshUntil = Date.now() + 20 * 1000;
-  processPushQueue();
+  if (error) throw error;
 }
 
-function queueCriticalText(to, text, source = "A") {
-  queueCriticalMessage(
-    to,
-    {
-      type: "text",
-      text
-    },
-    source
-  );
+async function queueCriticalText(to, text, source = "A") {
+  return enqueueMessage({
+    toId: to,
+    sourceName: source,
+    priority: PRIORITY_NEW_ORDER,
+    message: { type: "text", text }
+  });
 }
 
-function queueRefreshText(to, text, source = "A") {
+async function queueRefreshText(to, text, source = "A") {
   if (!REFRESH_ENABLED) return;
-  if (circuitBreaker) return;
-  if (Date.now() < pauseRefreshUntil) return;
-  if (criticalQueue.length > 0) return;
 
-  addQueue(refreshQueue, {
-    to,
-    retry: 0,
-    source,
-    priority: "refresh",
+  return enqueueMessage({
+    toId: to,
+    sourceName: source,
+    priority: PRIORITY_REFRESH,
+    message: { type: "text", text }
+  });
+}
+
+async function queueGroupMention(userId, text) {
+  return enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_DRIVER_SPRAY,
+    message: {
+      type: "textV2",
+      text: "{driver} " + text,
+      substitution: {
+        driver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId
+          }
+        }
+      }
+    }
+  });
+}
+
+async function queueTwoMentions(oldUserId, newUserId) {
+  return enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_DRIVER_SPRAY,
+    message: {
+      type: "textV2",
+      text: "{oldDriver} X\n{newDriver} 噴",
+      substitution: {
+        oldDriver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: oldUserId
+          }
+        },
+        newDriver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: newUserId
+          }
+        }
+      }
+    }
+  });
+}
+
+async function pushCustomerDispatch(customerLineId, plate, minutes, source = "A") {
+  return enqueueMessage({
+    toId: customerLineId,
+    sourceName: source,
+    priority: PRIORITY_CUSTOMER,
     message: {
       type: "text",
-      text
+      text: `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
     }
   });
 }
 
-async function processPushQueue() {
-  if (isPushSending) return;
-
-  isPushSending = true;
-
-  while (
-    criticalQueue.length > 0 ||
-    normalQueue.length > 0 ||
-    refreshQueue.length > 0
-  ) {
-    let job;
-
-    if (criticalQueue.length > 0) {
-      job = criticalQueue.shift();
-    } else if (normalQueue.length > 0) {
-      job = normalQueue.shift();
-    } else {
-      job = refreshQueue.shift();
+async function pushCustomerArrived(customerLineId, plate, source = "A") {
+  return enqueueMessage({
+    toId: customerLineId,
+    sourceName: source,
+    priority: PRIORITY_CUSTOMER,
+    message: {
+      type: "text",
+      text: `車輛已抵達\n車牌:${plate}`
     }
+  });
+}
 
-    try {
-      const targetClient = getClientBySource(job.source);
-      await targetClient.pushMessage(job.to, job.message);
-
-      currentPushGapMs = Math.max(
-        MIN_PUSH_GAP_MS,
-        currentPushGapMs - 300
-      );
-
-      let waitMs = currentPushGapMs;
-
-      while (waitMs > 0) {
-        await delay(500);
-        waitMs -= 500;
-
-        if (job.priority === "refresh" && criticalQueue.length > 0) {
-          break;
-        }
-      }
-    } catch (err) {
-      const status = getErrorStatus(err);
-      const data = getErrorData(err);
-
-      console.error("PUSH ERROR:", data);
-
-      if (
-        data &&
-        typeof data === "object" &&
-        data.message === "You have reached your monthly limit."
-      ) {
-        criticalQueue.length = 0;
-        normalQueue.length = 0;
-        refreshQueue.length = 0;
-        break;
-      }
-
-      if (status === 429 && job.retry < MAX_RETRY) {
-        total429++;
-        job.retry += 1;
-        tooMany429Count++;
-
-        REFRESH_ENABLED = false;
-        pauseRefreshUntil = Date.now() + 5 * 60 * 1000;
-
-        if (tooMany429Count >= 5) {
-          circuitBreaker = true;
-
-          setTimeout(() => {
-            circuitBreaker = false;
-            tooMany429Count = 0;
-            REFRESH_ENABLED = true;
-          }, 10 * 60 * 1000);
-        }
-
-        currentPushGapMs = Math.min(
-          MAX_PUSH_GAP_MS,
-          currentPushGapMs + 1500
-        );
-
-        await delay(currentPushGapMs * job.retry);
-
-        if (job.priority === "critical") {
-          criticalQueue.unshift(job);
-        } else if (job.priority === "normal") {
-          normalQueue.unshift(job);
-        } else {
-          refreshQueue.unshift(job);
-        }
-
-        continue;
-      }
-
-      await delay(currentPushGapMs);
+async function pushCustomerReservationChanged(customerLineId, reservationTime, source = "A") {
+  return enqueueMessage({
+    toId: customerLineId,
+    sourceName: source,
+    priority: PRIORITY_CUSTOMER,
+    message: {
+      type: "text",
+      text: `已為您更改為預約單\n預約時間:${reservationTime}`
     }
+  });
+}
+
+async function pushAskDriverReservationChange(order, reservationTime, paymentText = "") {
+  return enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_NEW_ORDER,
+    message: {
+      type: "textV2",
+      text:
+        `${order.order_code} ${reservationTime} ${order.address}${paymentText}\n` +
+        "{driver} 可不可更改",
+      substitution: {
+        driver: {
+          type: "mention",
+          mentionee: {
+            type: "user",
+            userId: order.assigned_driver_line_id
+          }
+        }
+      }
+    }
+  });
+}
+
+async function processMessageJobs() {
+  if (messageWorkerRunning) return;
+  messageWorkerRunning = true;
+
+  try {
+    const now = new Date().toISOString();
+
+    const { data: jobs, error } = await supabase
+      .from("message_jobs")
+      .select("*")
+      .eq("status", "pending")
+      .or(`locked_at.is.null,locked_at.lt.${now}`)
+      .order("priority", { ascending: true })
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    if (error) throw error;
+    if (!jobs || jobs.length === 0) return;
+
+    const job = jobs[0];
+
+    const { data: claimed, error: claimError } = await supabase
+      .from("message_jobs")
+      .update({
+        status: "processing",
+        locked_at: new Date().toISOString()
+      })
+      .eq("id", job.id)
+      .eq("status", "pending")
+      .select("*")
+      .maybeSingle();
+
+    if (claimError) throw claimError;
+    if (!claimed) return;
+
+    const targetClient = getClientBySource(claimed.source_name);
+
+    await targetClient.pushMessage(claimed.to_id, claimed.message_json);
+
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "sent",
+        sent_at: new Date().toISOString(),
+        error_message: null
+      })
+      .eq("id", claimed.id);
+  } catch (err) {
+    const status = getErrorStatus(err);
+    const data = getErrorData(err);
+    console.error("processMessageJobs error:", data);
+
+    total429 += status === 429 ? 1 : 0;
+  } finally {
+    messageWorkerRunning = false;
   }
-
-  isPushSending = false;
 }
 
 async function replyText(clientObj, replyToken, text) {
@@ -348,107 +390,6 @@ async function replyMention(clientObj, replyToken, userId, text) {
       }
     }
   });
-}
-
-function queueGroupMention(userId, text) {
-  queueCriticalMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text: "{driver} " + text,
-      substitution: {
-        driver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId
-          }
-        }
-      }
-    },
-    DRIVER_GROUP_SOURCE
-  );
-}
-
-function queueTwoMentions(oldUserId, newUserId) {
-  queueCriticalMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text: "{oldDriver} X\n{newDriver} 噴",
-      substitution: {
-        oldDriver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: oldUserId
-          }
-        },
-        newDriver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: newUserId
-          }
-        }
-      }
-    },
-    DRIVER_GROUP_SOURCE
-  );
-}
-
-function pushCustomerDispatch(customerLineId, plate, minutes, source = "A") {
-  queueCriticalText(
-    customerLineId,
-    `司機已出發\n車牌:${plate}\n約${minutes}分鐘`,
-    source
-  );
-}
-
-function pushCustomerArrived(customerLineId, plate, source = "A") {
-  queueCriticalText(
-    customerLineId,
-    `車輛已抵達\n車牌:${plate}`,
-    source
-  );
-}
-
-function pushCustomerReservationChanged(
-  customerLineId,
-  reservationTime,
-  source = "A"
-) {
-  queueCriticalText(
-    customerLineId,
-    `已為您更改為預約單\n預約時間:${reservationTime}`,
-    source
-  );
-}
-
-function pushAskDriverReservationChange(
-  order,
-  reservationTime,
-  paymentText = ""
-) {
-  queueCriticalMessage(
-    DRIVER_GROUP_ID,
-    {
-      type: "textV2",
-      text:
-        `${order.order_code} ${reservationTime} ${order.address}${paymentText}\n` +
-        "{driver} 可不可更改",
-      substitution: {
-        driver: {
-          type: "mention",
-          mentionee: {
-            type: "user",
-            userId: order.assigned_driver_line_id
-          }
-        }
-      }
-    },
-    DRIVER_GROUP_SOURCE
-  );
 }
 
 function checkCustomerCooldown(customerLineId) {
@@ -520,49 +461,6 @@ function parseStrictDriverMessage(text) {
   return null;
 }
 
-  if (parts.length < 4) return null;
-
-  const orderCode = parts[0];
-  const lastText = parts[parts.length - 1];
-  const plate = parts[parts.length - 2];
-  const address = parts.slice(1, parts.length - 2).join(" ");
-
-  if (!orderCode.startsWith("#")) return null;
-  if (!address || !plate) return null;
-
-  if (["到", "到了", "抵達"].includes(lastText)) {
-    return {
-      type: "arrived",
-      orderCode,
-      address,
-      plate
-    };
-  }
-
-  if (["客上", "上車", "完成"].includes(lastText)) {
-    return {
-      type: "customer_on",
-      orderCode,
-      address,
-      plate
-    };
-  }
-
-  const minutes = Number(
-    lastText.replace("分鐘", "").replace("分", "")
-  );
-
-  if (!Number.isFinite(minutes)) return null;
-
-  return {
-    type: "report",
-    orderCode,
-    address,
-    plate,
-    minutes
-  };
-}
-
 async function rememberDriverOrder({
   driverLineId,
   order,
@@ -587,11 +485,6 @@ async function handleBotControl(event, text, clientObj) {
   if (text === "停止機器人運作" || text === "停止") {
     BOT_ENABLED = false;
     await setBotSetting("bot_enabled", "false");
-
-    criticalQueue.length = 0;
-    normalQueue.length = 0;
-    refreshQueue.length = 0;
-
     await replyText(clientObj, event.replyToken, "機器人已停止運作");
     return true;
   }
@@ -599,7 +492,6 @@ async function handleBotControl(event, text, clientObj) {
   if (text === "開始機器人運作" || text === "開始") {
     BOT_ENABLED = true;
     await setBotSetting("bot_enabled", "true");
-
     await replyText(clientObj, event.replyToken, "機器人已開始運作");
     return true;
   }
@@ -607,9 +499,6 @@ async function handleBotControl(event, text, clientObj) {
   if (text === "停止刷單") {
     REFRESH_ENABLED = false;
     await setBotSetting("refresh_enabled", "false");
-
-    refreshQueue.length = 0;
-
     await replyText(clientObj, event.replyToken, "刷單功能已停止");
     return true;
   }
@@ -617,12 +506,16 @@ async function handleBotControl(event, text, clientObj) {
   if (text === "開始刷單") {
     REFRESH_ENABLED = true;
     await setBotSetting("refresh_enabled", "true");
-
     await replyText(clientObj, event.replyToken, "刷單功能已開始");
     return true;
   }
 
   if (text === "系統狀態") {
+    const { count: pendingJobs } = await supabase
+      .from("message_jobs")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "pending");
+
     await replyText(
       clientObj,
       event.replyToken,
@@ -632,9 +525,7 @@ REFRESH:${REFRESH_ENABLED}
 總訂單:${totalOrders}
 已取消:${totalCanceled}
 已派送:${totalAssigned}
-Critical:${criticalQueue.length}
-Normal:${normalQueue.length}
-Refresh:${refreshQueue.length}
+待送訊息:${pendingJobs || 0}
 GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
     );
 
@@ -644,30 +535,30 @@ GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
   return false;
 }
 
-app.post("/webhook", line.middleware(configA), async (req, res) => {
-  res.status(200).end();
-
-  const events = req.body.events || [];
-
-  for (const event of events) {
-    handleEvent(event, clientA, "A").catch(err => {
-      console.error("A error:", err);
-    });
-  }
-});
-
-if (hasLineB) {
-  app.post("/webhook-b", line.middleware(configB), async (req, res) => {
+function registerWebhook(path, config, sourceName) {
+  app.post(path, line.middleware(config), async (req, res) => {
     res.status(200).end();
 
     const events = req.body.events || [];
+    const item = clients.get(sourceName);
+
+    if (!item) {
+      console.error("Unknown webhook source:", sourceName);
+      return;
+    }
 
     for (const event of events) {
-      handleEvent(event, clientB, "B").catch(err => {
-        console.error("B error:", err);
+      handleEvent(event, item.client, sourceName).catch(err => {
+        console.error(`${sourceName} error:`, err);
       });
     }
   });
+}
+
+registerWebhook("/webhook", configA, "A");
+
+if (hasLineB) {
+  registerWebhook("/webhook-b", configB, "B");
 }
 
 async function handleEvent(event, clientObj, source) {
@@ -682,29 +573,23 @@ async function handleEvent(event, clientObj, source) {
 
   if (event.source.type === "group") {
     if (event.source.groupId !== DRIVER_GROUP_ID) return;
-
     if (!BOT_ENABLED) return;
 
     if (text === "可" || text === "不同意") {
-      const reservationReply = await handleReservationDriverReply(
-        event,
-        text,
-        clientObj
-      );
-
+      const reservationReply = await handleReservationDriverReply(event, text, clientObj);
       if (reservationReply) return;
     }
 
     if (!checkDriverCooldown(event.source.userId)) return;
-
     if (!text.startsWith("#")) return;
 
-  const parsedStrict = parseStrictDriverMessage(text);
+    const parsedStrict = parseStrictDriverMessage(text);
+
     if (!parsedStrict) {
-  return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-}
-  return handleDriverReport(event, text, clientObj, parsedStrict);
-    return handleDriverReport(event, text, clientObj);
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+
+    return handleDriverReport(event, text, clientObj, parsedStrict);
   }
 
   if (event.source.type === "user") {
@@ -726,7 +611,6 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
 
   try {
     if (processingOrders.has(customerLineId)) return;
-
     processingOrders.add(customerLineId);
 
     if (
@@ -736,7 +620,6 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       addressText === "不用車"
     ) {
       const canceledOrder = await cancelLatestCustomerOrder(customerLineId);
-
       processingOrders.delete(customerLineId);
 
       if (!canceledOrder) {
@@ -744,10 +627,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       }
 
       if (canceledOrder.assigned_driver_line_id) {
-        queueGroupMention(
-          canceledOrder.assigned_driver_line_id,
-          "取"
-        );
+        await queueGroupMention(canceledOrder.assigned_driver_line_id, "取");
       }
 
       const currentFee = cancelFees.get(customerLineId) || 0;
@@ -772,10 +652,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
     if (paymentDetected) {
       await upsertCustomerPreference(customerLineId, paymentDetected.value);
 
-      const cleanedAddress = removePaymentKeyword(
-        addressText,
-        paymentDetected.keyword
-      );
+      const cleanedAddress = removePaymentKeyword(addressText, paymentDetected.keyword);
 
       if (cleanedAddress.length < 3) {
         processingOrders.delete(customerLineId);
@@ -791,11 +668,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
 
     if (addressText.startsWith("改預約")) {
       processingOrders.delete(customerLineId);
-      return handleCustomerChangeToReservation(
-        event,
-        addressText,
-        clientObj
-      );
+      return handleCustomerChangeToReservation(event, addressText, clientObj);
     }
 
     if (addressText.length < 3) {
@@ -809,9 +682,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
     const preference = await getCustomerPreference(customerLineId);
 
     const paymentText =
-      preference && preference.payment_method
-        ? ` ${preference.payment_method}`
-        : "";
+      preference && preference.payment_method ? ` ${preference.payment_method}` : "";
 
     const fee = cancelFees.get(customerLineId) || 0;
     const feeText = fee > 0 ? ` 代收取消費${fee}` : "";
@@ -820,11 +691,15 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
 
     await replyText(clientObj, event.replyToken, "立即為您派車");
 
-    queueCriticalText(
-      DRIVER_GROUP_ID,
-      `${order.order_code} ${order.address}${paymentText}${feeText}`,
-      DRIVER_GROUP_SOURCE
-    );
+    await enqueueMessage({
+      toId: DRIVER_GROUP_ID,
+      sourceName: DRIVER_GROUP_SOURCE,
+      priority: PRIORITY_NEW_ORDER,
+      message: {
+        type: "text",
+        text: `${order.order_code} ${order.address}${paymentText}${feeText}`
+      }
+    });
   } catch (err) {
     processingOrders.delete(customerLineId);
     console.error("handleCustomerOrder error:", err);
@@ -832,11 +707,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
   }
 }
 
-async function handleCustomerChangeToReservation(
-  event,
-  text,
-  clientObj
-) {
+async function handleCustomerChangeToReservation(event, text, clientObj) {
   const parts = text.split(/\s+/);
 
   if (parts.length < 2) {
@@ -854,16 +725,18 @@ async function handleCustomerChangeToReservation(
   const preference = await getCustomerPreference(event.source.userId);
 
   const paymentText =
-    preference && preference.payment_method
-      ? ` ${preference.payment_method}`
-      : "";
+    preference && preference.payment_method ? ` ${preference.payment_method}` : "";
 
   if (order.status !== "assigned" || !order.assigned_driver_line_id) {
-    queueCriticalText(
-      DRIVER_GROUP_ID,
-      `${order.order_code} ${reservationTime} ${order.address}${paymentText}`,
-      DRIVER_GROUP_SOURCE
-    );
+    await enqueueMessage({
+      toId: DRIVER_GROUP_ID,
+      sourceName: DRIVER_GROUP_SOURCE,
+      priority: PRIORITY_NEW_ORDER,
+      message: {
+        type: "text",
+        text: `${order.order_code} ${reservationTime} ${order.address}${paymentText}`
+      }
+    });
 
     return replyText(
       clientObj,
@@ -882,7 +755,7 @@ async function handleCustomerChangeToReservation(
     source: orderSource
   });
 
-  pushAskDriverReservationChange(order, reservationTime, paymentText);
+  await pushAskDriverReservationChange(order, reservationTime, paymentText);
 
   return replyText(clientObj, event.replyToken, "已詢問司機是否可更改，請稍等");
 }
@@ -902,7 +775,7 @@ async function handleReservationDriverReply(event, text, clientObj) {
     if (cleanText === "可") {
       pendingReservationChanges.delete(orderCode);
 
-      pushCustomerReservationChanged(
+      await pushCustomerReservationChanged(
         pending.customerLineId,
         pending.reservationTime,
         orderSource
@@ -919,11 +792,15 @@ async function handleReservationDriverReply(event, text, clientObj) {
 
       await resetOrderForReDispatch(pending.order.order_id);
 
-      queueCriticalText(
-        DRIVER_GROUP_ID,
-        `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`,
-        DRIVER_GROUP_SOURCE
-      );
+      await enqueueMessage({
+        toId: DRIVER_GROUP_ID,
+        sourceName: DRIVER_GROUP_SOURCE,
+        priority: PRIORITY_NEW_ORDER,
+        message: {
+          type: "text",
+          text: `${pending.order.order_code} ${pending.reservationTime} ${pending.address}${pending.paymentText || ""}`
+        }
+      });
 
       return true;
     }
@@ -960,7 +837,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       status: "arrived"
     });
 
-    pushCustomerArrived(order.customer_line_id, plate, orderSource);
+    await pushCustomerArrived(order.customer_line_id, plate, orderSource);
     return;
   }
 
@@ -978,11 +855,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   }
 
   if (order.status === "assigned") {
-    const oldArrival = getArrivalTimeMs(
-      order.assigned_at,
-      order.assigned_minutes
-    );
-
+    const oldArrival = getArrivalTimeMs(order.assigned_at, order.assigned_minutes);
     const newArrival = Date.now() + Number(minutes) * 60 * 1000;
     const diffMinutes = (oldArrival - newArrival) / 1000 / 60;
 
@@ -1007,9 +880,9 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       plate
     });
 
-    queueTwoMentions(oldDriverLineId, event.source.userId);
+    await queueTwoMentions(oldDriverLineId, event.source.userId);
 
-    pushCustomerDispatch(
+    await pushCustomerDispatch(
       updatedOrder.customer_line_id,
       plate,
       minutes,
@@ -1023,11 +896,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const firstReport = await getFirstDriverReport(order.order_id);
 
   if (firstReport) {
-    const firstArrival = getArrivalTimeMs(
-      firstReport.created_at,
-      firstReport.minutes
-    );
-
+    const firstArrival = getArrivalTimeMs(firstReport.created_at, firstReport.minutes);
     const newArrival = Date.now() + Number(minutes) * 60 * 1000;
     const diffMinutes = (firstArrival - newArrival) / 1000 / 60;
 
@@ -1037,21 +906,21 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   }
 
   try {
-  await addDriverReport({
-    orderId: order.order_id,
-    orderCode,
-    address,
-    driverLineId: event.source.userId,
-    plate,
-    minutes
-  });
-} catch (err) {
-  if (err.code === "23505") {
-    return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-  }
+    await addDriverReport({
+      orderId: order.order_id,
+      orderCode,
+      address,
+      driverLineId: event.source.userId,
+      plate,
+      minutes
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
 
-  throw err;
-}
+    throw err;
+  }
 
   if (Number(minutes) <= INSTANT_WIN_MINUTES) {
     const updatedOrder = await overrideDriver({
@@ -1071,7 +940,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
 
-    pushCustomerDispatch(
+    await pushCustomerDispatch(
       updatedOrder.customer_line_id,
       plate,
       minutes,
@@ -1108,12 +977,9 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await addPendingWinner({
-          orderId: order.order_id,
-          driverId: winner.driver_line_id
-        });
+        await queueGroupMention(winner.driver_line_id, "噴");
 
-        pushCustomerDispatch(
+        await pushCustomerDispatch(
           assignedOrder.customer_line_id,
           winner.plate,
           winner.minutes,
@@ -1133,9 +999,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 async function refreshOpenOrders() {
   if (!BOT_ENABLED) return;
   if (!REFRESH_ENABLED) return;
-  if (circuitBreaker) return;
-  if (Date.now() < pauseRefreshUntil) return;
-  if (criticalQueue.length > 0) return;
 
   try {
     const orders = await getOpenOrdersForRefresh();
@@ -1144,14 +1007,13 @@ async function refreshOpenOrders() {
 
     const refreshTargets = orders.slice(0, REFRESH_BATCH_SIZE);
 
-    queueRefreshText(
+    await queueRefreshText(
       DRIVER_GROUP_ID,
       "🪳---🪳 我是分隔線 🪳---🪳",
       DRIVER_GROUP_SOURCE
     );
 
     for (const order of refreshTargets) {
-      if (criticalQueue.length > 0) break;
       if (refreshingOrders.has(order.order_id)) continue;
 
       refreshingOrders.add(order.order_id);
@@ -1159,11 +1021,9 @@ async function refreshOpenOrders() {
       const preference = await getCustomerPreference(order.customer_line_id);
 
       const paymentText =
-        preference && preference.payment_method
-          ? ` ${preference.payment_method}`
-          : "";
+        preference && preference.payment_method ? ` ${preference.payment_method}` : "";
 
-      queueRefreshText(
+      await queueRefreshText(
         DRIVER_GROUP_ID,
         `${order.order_code} ${order.address}${paymentText}`,
         DRIVER_GROUP_SOURCE
@@ -1181,23 +1041,15 @@ async function refreshOpenOrders() {
   }
 }
 
-setInterval(() => {
-  if (!REFRESH_ENABLED && !circuitBreaker && Date.now() > pauseRefreshUntil) {
-    REFRESH_ENABLED = true;
-  }
-}, 60 * 1000);
+setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
+setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 setInterval(() => {
   console.log(
-    `Critical:${criticalQueue.length}
-Normal:${normalQueue.length}
-Refresh:${refreshQueue.length}
-429:${total429}
+    `429:${total429}
 GoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`
   );
 }, 5 * 60 * 1000);
-
-setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 app.get("/", (req, res) => {
   res.send(`BOT=${BOT_ENABLED} REFRESH=${REFRESH_ENABLED} GOOGLE=${GOOGLE_API_ENABLED}`);
@@ -1218,6 +1070,7 @@ loadBotSettings().then(() => {
     console.log("BOT RUNNING:", port);
     console.log("官方A: ON");
     console.log("官方B:", hasLineB ? "ON" : "OFF");
+    console.log("Supabase message_jobs: ON");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
