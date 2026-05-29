@@ -10,6 +10,7 @@ const {
   createOrder,
   addDriverReport,
   decideWinner,
+  getFirstDriverReport,
   getOrderByCodeAndAddress,
   getLatestCustomerOrder,
   upsertCustomerPreference,
@@ -739,6 +740,34 @@ if (firstReport && firstReport.driver_line_id !== event.source.userId) {
 
   if (diffMinutes < COMPETE_DIFF_MINUTES) {
     return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+  }
+}
+
+const firstReport = await getFirstDriverReport(order.order_id);
+
+if (
+  firstReport &&
+  firstReport.driver_line_id !== event.source.userId
+) {
+  const firstArrival =
+    getArrivalTimeMs(
+      firstReport.created_at,
+      firstReport.minutes
+    );
+
+  const newArrival =
+    Date.now() + minutes * 60 * 1000;
+
+  const diffMinutes =
+    (firstArrival - newArrival) / 1000 / 60;
+
+  if (diffMinutes < 3) {
+    return replyMention(
+      clientObj,
+      event.replyToken,
+      event.source.userId,
+      "X"
+    );
   }
 }
 
