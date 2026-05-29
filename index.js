@@ -41,7 +41,6 @@ let REFRESH_ENABLED = true;
 
 const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
-const INSTANT_WIN_MINUTES = 5;
 
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 1;
@@ -49,7 +48,6 @@ const REFRESH_BATCH_SIZE = 1;
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
 
-const PRIORITY_INSTANT_SPRAY = 1;
 const PRIORITY_OVERRIDE_SPRAY = 2;
 const PRIORITY_CUSTOMER = 3;
 const PRIORITY_COUNTDOWN_SPRAY = 4;
@@ -191,32 +189,6 @@ async function enqueueMessage({
     : await query.insert(payload);
 
   if (error) throw error;
-}
-
-async function addPendingWinner({ orderId, orderCode, driverLineId }) {
-  const { error } = await supabase
-    .from("pending_winners")
-    .upsert(
-      {
-        order_id: orderId,
-        order_code: orderCode,
-        driver_line_id: driverLineId,
-        status: "pending"
-      },
-      {
-        onConflict: "order_id,driver_line_id"
-      }
-    );
-
-  if (error) throw error;
-}
-
-async function safeAddPendingWinner({ orderId, orderCode, driverLineId, label }) {
-  try {
-    await addPendingWinner({ orderId, orderCode, driverLineId });
-  } catch (err) {
-    console.error(`safeAddPendingWinner ${label || ""} error:`, err);
-  }
 }
 
 async function queueRefreshText(to, text, source = "A") {
@@ -434,38 +406,6 @@ async function processMessageJobs() {
     }
   } finally {
     messageWorkerRunning = false;
-  }
-}
-
-async function recoverPendingWinners() {
-  try {
-    const { data: winners, error } = await supabase
-      .from("pending_winners")
-      .select("*")
-      .eq("status", "pending")
-      .limit(10);
-
-    if (error) throw error;
-    if (!winners || winners.length === 0) return;
-
-    for (const winner of winners) {
-      await queueGroupMention(
-        winner.driver_line_id,
-        "噴",
-        winner.order_id,
-        PRIORITY_INSTANT_SPRAY
-      );
-
-      await supabase
-        .from("pending_winners")
-        .update({
-          status: "sent",
-          sent_at: new Date().toISOString()
-        })
-        .eq("id", winner.id);
-    }
-  } catch (err) {
-    console.error("recoverPendingWinners error:", err);
   }
 }
 
@@ -1226,8 +1166,7 @@ loadBotSettings().then(() => {
     console.log("官方A: ON");
     console.log("官方B:", hasLineB ? "ON" : "OFF");
     console.log("Supabase message_jobs: ON");
-    console.log("Pending winners recovery: ON");
-    console.log("Priority: 5min > 3min > 7min > 10sec > order > refresh");
+    console.log("Priority: countdown > order > refresh");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
-  });
+      });
 });
