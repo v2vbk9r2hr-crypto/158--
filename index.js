@@ -1136,7 +1136,7 @@ async function refreshOpenOrders() {
 }
 
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
-setInterval(recoverPendingWinners, 30000);
+// setInterval(recoverPendingWinners, 30000);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 
 setInterval(() => {
