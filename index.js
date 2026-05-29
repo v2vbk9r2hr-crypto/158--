@@ -49,15 +49,6 @@ const REFRESH_BATCH_SIZE = 1;
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
 
-/*
-優先級：
-1 = 5分鐘秒噴
-2 = 7分鐘覆蓋噴 / 取
-3 = 客人重要通知
-4 = 倒數10秒噴
-5 = 新單報單
-9 = 刷單
-*/
 const PRIORITY_INSTANT_SPRAY = 1;
 const PRIORITY_OVERRIDE_SPRAY = 2;
 const PRIORITY_CUSTOMER = 3;
@@ -218,6 +209,14 @@ async function addPendingWinner({ orderId, orderCode, driverLineId }) {
     );
 
   if (error) throw error;
+}
+
+async function safeAddPendingWinner({ orderId, orderCode, driverLineId, label }) {
+  try {
+    await addPendingWinner({ orderId, orderCode, driverLineId });
+  } catch (err) {
+    console.error(`safeAddPendingWinner ${label || ""} error:`, err);
+  }
 }
 
 async function queueCriticalText(to, text, source = "A") {
@@ -967,10 +966,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
-  /*
-  最高優先：5分鐘秒噴。
-  放在3分鐘條件與7分鐘條件之前。
-  */
   if (Number(minutes) <= INSTANT_WIN_MINUTES) {
     try {
       await addDriverReport({
@@ -1005,21 +1000,19 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
       plate
     });
 
+    await safeAddPendingWinner({
+      orderId: updatedOrder.order_id,
+      orderCode: updatedOrder.order_code,
+      driverLineId: event.source.userId,
+      label: "instant"
+    });
+
     await queueGroupMention(
       event.source.userId,
       "噴",
       updatedOrder.order_id,
       PRIORITY_INSTANT_SPRAY
     );
-
-    await supabase
-  .from("pending_winners")
-  .update({
-    status: "sent",
-    sent_at: new Date().toISOString()
-  })
-  .eq("order_id", updatedOrder.order_id)
-  .eq("driver_line_id", event.source.userId);
 
     if (oldDriverLineId && oldDriverLineId !== event.source.userId) {
       await queueGroupMention(
@@ -1028,16 +1021,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
         updatedOrder.order_id,
         PRIORITY_OVERRIDE_SPRAY
       );
-    }
-
-    try {
-      await addPendingWinner({
-        orderId: updatedOrder.order_id,
-        orderCode: updatedOrder.order_code,
-        driverLineId: event.source.userId
-      });
-    } catch (err) {
-      console.error("addPendingWinner instant error:", err);
     }
 
     await pushCustomerDispatch(
@@ -1051,10 +1034,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
-  /*
-  已派單後：7分鐘覆蓋規則。
-  5分鐘秒噴已經在前面處理，所以這裡處理非5分鐘的覆蓋。
-  */
   if (order.status === "assigned") {
     const oldArrival = getArrivalTimeMs(order.assigned_at, order.assigned_minutes);
     const newArrival = Date.now() + Number(minutes) * 60 * 1000;
@@ -1094,9 +1073,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
-  /*
-  未派單競爭：3分鐘條件。
-  */
   const firstReport = await getFirstDriverReport(order.order_id);
 
   if (firstReport) {
@@ -1126,9 +1102,6 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     throw err;
   }
 
-  /*
-  倒數10秒噴。
-  */
   if (!order.decision_started && !decidingOrders.has(order.order_id)) {
     await assignWinnerDriver(order.order_id);
 
@@ -1155,31 +1128,19 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
+        await safeAddPendingWinner({
+          orderId: assignedOrder.order_id,
+          orderCode: assignedOrder.order_code,
+          driverLineId: winner.driver_line_id,
+          label: "countdown"
+        });
+
         await queueGroupMention(
           winner.driver_line_id,
           "噴",
           assignedOrder.order_id,
           PRIORITY_COUNTDOWN_SPRAY
         );
-
-        await supabase
-  .from("pending_winners")
-  .update({
-    status: "sent",
-    sent_at: new Date().toISOString()
-  })
-  .eq("order_id", assignedOrder.order_id)
-  .eq("driver_line_id", winner.driver_line_id);
-
-        try {
-          await addPendingWinner({
-            orderId: assignedOrder.order_id,
-            orderCode: assignedOrder.order_code,
-            driverLineId: winner.driver_line_id
-          });
-        } catch (err) {
-          console.error("addPendingWinner countdown error:", err);
-        }
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
