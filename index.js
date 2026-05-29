@@ -760,6 +760,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
       try {
         const result = await decideWinner(order.order_id);
+        console.log("DECIDE RESULT:", result);
         if (!result) return;
 
         const { order: assignedOrder, winner } = result;
@@ -773,12 +774,23 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
           plate: winner.plate
         });
 
-        await queueGroupMention(
-          winner.driver_line_id,
-          "噴",
-          assignedOrder.order_id,
-          PRIORITY_COUNTDOWN_SPRAY
-        );
+        try {
+  await getClientBySource(DRIVER_GROUP_SOURCE).pushMessage(DRIVER_GROUP_ID, {
+    type: "textV2",
+    text: "{driver} 噴",
+    substitution: {
+      driver: {
+        type: "mention",
+        mentionee: {
+          type: "user",
+          userId: winner.driver_line_id
+        }
+      }
+    }
+  });
+} catch (err) {
+  console.error("direct spray push error:", err);
+}
 
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
