@@ -774,7 +774,36 @@ function registerWebhook(path, config, sourceName) {
 registerWebhook("/webhook", configA, "A");
 if (hasLineB) registerWebhook("/webhook-b", configB, "B");
 
+async function replyText(clientObj, replyToken, text) {
+  return clientObj.replyMessage(replyToken, {
+    type: "text",
+    text
+  });
+}
+
+async function replyMention(clientObj, replyToken, userId, text) {
+  return clientObj.replyMessage(replyToken, {
+    type: "textV2",
+    text: "{driver} " + text,
+    substitution: {
+      driver: {
+        type: "mention",
+        mentionee: {
+          type: "user",
+          userId
+        }
+      }
+    }
+  });
+}
+
 async function handleEvent(event, clientObj, source) {
+  console.log("EVENT:", source, event.type, JSON.stringify(event.source));
+
+  if (event.type === "join") {
+    return replyText(clientObj, event.replyToken, `已加入群組 source:${source}`);
+  }
+
   if (event.type !== "message") return;
   if (event.message.type !== "text") return;
 
