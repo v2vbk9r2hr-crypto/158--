@@ -900,7 +900,11 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   const plate = parsed.plate;
   const minutes = Number(parsed.minutes);
 
-  const order = await getOrderByCodeAndAddress(orderCode, address);
+  let order = await getOrderByCodeAndAddress(orderCode, address);
+
+if (!order && (parsed.type === "reservation_late" || parsed.type === "reservation_ready")) {
+  order = await getOrderByCodeAndAddress(orderCode, "");
+}
 
   if (!order) return replyMention(clientObj, event.replyToken, event.source.userId, "X");
 

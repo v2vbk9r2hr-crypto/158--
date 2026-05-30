@@ -65,6 +65,20 @@ async function getOrderByCodeAndAddress(orderCode, address) {
   return fallback;
 }
 
+async function getOrderByCode(orderCode) {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("order_code", orderCode)
+    .neq("status", "completed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
 async function getLatestCustomerOrder(customerLineId) {
   const { data, error } = await supabase
     .from("orders")
@@ -343,6 +357,7 @@ async function setBotSetting(key, value) {
 module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
+  getOrderByCode,
   getLatestCustomerOrder,
   upsertCustomerPreference,
   getCustomerPreference,
