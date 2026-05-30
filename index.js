@@ -28,8 +28,8 @@ const {
 
 const app = express();
 
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use("/admin", express.urlencoded({ extended: true }));
+app.use("/admin", express.json());
 
 if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
 if (!process.env.LINE_CHANNEL_SECRET) throw new Error("Missing LINE_CHANNEL_SECRET");
