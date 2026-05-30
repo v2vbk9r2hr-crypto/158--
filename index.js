@@ -34,8 +34,8 @@ const app = express();
 app.use("/admin", express.urlencoded({ extended: true }));
 app.use("/admin", express.json());
 
-if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
-if (!process.env.LINE_CHANNEL_SECRET) throw new Error("Missing LINE_CHANNEL_SECRET");
+if (!process.env.BOT1_CHANNEL_ACCESS_TOKEN) throw new Error("Missing BOT1_CHANNEL_ACCESS_TOKEN");
+if (!process.env.BOT1_CHANNEL_SECRET) throw new Error("Missing BOT1_CHANNEL_SECRET");
 if (!process.env.DRIVER_GROUP_ID) throw new Error("Missing DRIVER_GROUP_ID");
 
 const DRIVER_GROUP_ID = process.env.DRIVER_GROUP_ID;
@@ -118,15 +118,15 @@ function getClientBySource(sourceName) {
 
 const configA = registerClient(
   "A",
-  process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  process.env.LINE_CHANNEL_SECRET
+  process.env.BOT1_CHANNEL_ACCESS_TOKEN,
+  process.env.BOT1_CHANNEL_SECRET
 );
 
-const hasLineB = !!process.env.LINE_B_CHANNEL_ACCESS_TOKEN && !!process.env.LINE_B_CHANNEL_SECRET;
+const hasLineB = !!process.env.BOT2_CHANNEL_ACCESS_TOKEN && !!process.env.BOT2_CHANNEL_SECRET;
 let configB = null;
 
 if (hasLineB) {
-  configB = registerClient("B", process.env.LINE_B_CHANNEL_ACCESS_TOKEN, process.env.LINE_B_CHANNEL_SECRET);
+  configB = registerClient("B", process.env.BOT2_CHANNEL_ACCESS_TOKEN, process.env.BOT2_CHANNEL_SECRET);
   console.log("官方B 已啟用");
 } else {
   console.log("官方B 尚未啟用");
