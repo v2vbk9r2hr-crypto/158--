@@ -12,6 +12,7 @@ const {
   decideWinner,
   getFirstDriverReport,
   getOrderByCodeAndAddress,
+  getOrderByCode,
   getLatestCustomerOrder,
   upsertCustomerPreference,
   getCustomerPreference,
@@ -927,7 +928,7 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
   let order = await getOrderByCodeAndAddress(orderCode, address);
 
 if (!order && (parsed.type === "reservation_late" || parsed.type === "reservation_ready")) {
-  order = await getOrderByCodeAndAddress(orderCode, "");
+  order = await getOrderByCode(orderCode);
 }
 
   if (!order) return replyMention(clientObj, event.replyToken, event.source.userId, "X");
@@ -983,6 +984,11 @@ if (
   (parsed.type === "reservation_late" || parsed.type === "reservation_ready")
 ) {
   const key = order.order_id;
+  const lockedWinner = reservationWinners.get(key);
+
+if (lockedWinner && lockedWinner.driverLineId !== event.source.userId) {
+  return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+}
 
   // 準：誰先報準誰贏
   if (parsed.type === "reservation_ready") {
@@ -998,6 +1004,13 @@ if (
       reservationText: parsed.reservationText,
       createdAt: Date.now()
     });
+
+    reservationWinners.set(key, {
+  driverLineId: event.source.userId,
+  plate,
+  reservationText: "準",
+  createdAt: Date.now()
+});
 
     const pending5 = reservationPending5.get(key);
 
@@ -1083,6 +1096,13 @@ if (
           plate: stillPending.plate,
           minutes: 5
         });
+
+        reservationWinners.set(key, {
+  driverLineId: stillPending.driverLineId,
+  plate: stillPending.plate,
+  reservationText: "晚5",
+  createdAt: Date.now()
+});
 
         await rememberDriverOrder({
           driverLineId: stillPending.driverLineId,
