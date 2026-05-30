@@ -21,3 +21,14 @@ const supabase = createClient(
 module.exports = {
   supabase
 };
+
+console.log("URL =", SUPABASE_URL);
+
+(async () => {
+  const { data, error } = await supabase
+    .from("bot_settings")
+    .select("*")
+    .limit(1);
+
+  console.log("SUPABASE TEST:", { data, error });
+})();

@@ -82,6 +82,28 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function logSystemError(source, err) {
+  try {
+    const message =
+      err?.message ||
+      err?.error_description ||
+      String(err);
+
+    const detail =
+      typeof err === "object"
+        ? JSON.stringify(err)
+        : String(err);
+
+    await supabase.from("system_errors").insert([{
+      source,
+      message,
+      detail
+    }]);
+  } catch (logErr) {
+    console.error("logSystemError failed:", logErr);
+  }
+}
+
 function registerClient(sourceName, channelAccessToken, channelSecret) {
   const config = { channelAccessToken, channelSecret };
   clients.set(sourceName, { client: new line.Client(config), config });
@@ -189,23 +211,23 @@ function parseErrandOrder(text) {
   if (!isErrand) return null;
 
   const timeMatch = fullText.match(/(\d{1,2})[.:：](\d{2})/);
+
   const reserveTime = timeMatch
     ? `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}`
     : "";
 
-  const needAdvance = fullText.includes("需代墊") ? "需代墊" : "不需代墊";
+  const needAdvance = fullText.includes("需代墊")
+    ? "需代墊"
+    : "不需代墊";
 
   let payment = "現金";
+
   if (fullText.includes("街口")) payment = "街口";
   if (fullText.includes("轉帳")) payment = "轉帳";
-  if (fullText.includes("現金")) payment = "現金";
 
   const addressLine =
     lines.find(line =>
-      /市|縣|區|路|街|巷|號/.test(line) &&
-      !line.includes("百貨") &&
-      !line.includes("商場") &&
-      !line.includes("快閃櫃")
+      /市|縣|區|路|街|巷|號/.test(line)
     ) || "";
 
   let pickupLine =
@@ -223,31 +245,53 @@ function parseErrandOrder(text) {
 
   const taskLines = lines.filter(line => {
     if (line.includes("跑腿")) return false;
-    if (line === "需代墊" || line === "不需代墊") return false;
-    if (line === "街口" || line === "轉帳" || line === "現金") return false;
+    if (line === "需代墊") return false;
+    if (line === "不需代墊") return false;
+    if (line === "街口") return false;
+    if (line === "轉帳") return false;
+    if (line === "現金") return false;
     if (line === addressLine) return false;
-    if (line.includes("百貨") || line.includes("商場") || line.includes("快閃櫃")) return false;
+    if (line === pickupLine) return false;
     if (/^\d{1,2}[.:：]\d{2}/.test(line)) return false;
     return true;
   });
 
   const task = taskLines.join("").replace(/對?送到/g, "").trim();
-  const actionText = `${pickupLine}買${task}`.replace(/\s+/g, "");
 
- const parts = [];
+  const actionText =
+    `${pickupLine}買${task}`.replace(/\s+/g, "");
 
-parts.push("跑腿");
+  const parts = [];
 
-if (reserveTime) {
-  parts.push(reserveTime);
-}
+  parts.push("跑腿");
 
-parts.push(needAdvance);
-parts.push(actionText || "跑腿服務");
-parts.push(addressLine || "未提供地址");
-parts.push(payment);
+  if (reserveTime) {
+    parts.push(reserveTime);
+  }
+
+  parts.push(needAdvance);
+  parts.push(actionText || "跑腿服務");
+  parts.push(addressLine || "未提供地址");
+  parts.push(payment);
 
   return parts.join("/");
+}
+
+function parseDriverServiceOrder(text) {
+  const clean = String(text).trim();
+
+  if (!clean.includes("代駕")) return null;
+
+  const location = clean
+    .replace(/^代駕[:：\s]*/, "")
+    .replace(/代駕/g, "")
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, "")
+    .trim();
+
+  if (!location) return null;
+
+  return `代駕/${location}`;
 }
 
 async function enqueueMessage({ toId, sourceName = "A", priority = 5, message, orderId = null, jobKey = null }) {
@@ -431,6 +475,7 @@ async function processMessageJobs() {
     const data = getErrorData(err);
 
     console.error("processMessageJobs error:", data);
+    await logSystemError("processMessageJobs", data);
 
     if (status === 429) total429++;
 
@@ -763,6 +808,32 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       return replyText(clientObj, event.replyToken, "已取消您的固定付款方式");
     }
 
+const driverServiceText = parseDriverServiceOrder(addressText);
+
+if (driverServiceText) {
+  const order = await createOrder(
+    driverServiceText,
+    customerLineId,
+    source
+  );
+
+  totalOrders++;
+
+  processingOrders.delete(customerLineId);
+
+  await enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_NEW_ORDER,
+    message: {
+      type: "text",
+      text: `${order.order_code}${order.address}`
+    }
+  });
+
+  return;
+}
+
     const errandOrderText = parseErrandOrder(addressText);
 
     if (errandOrderText) {
@@ -835,6 +906,7 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
   } catch (err) {
     processingOrders.delete(customerLineId);
     console.error("handleCustomerOrder error:", err);
+    await logSystemError("handleCustomerOrder", err);
     return replyText(clientObj, event.replyToken, "系統忙碌中");
   }
 }
@@ -1312,6 +1384,7 @@ if (
         totalAssigned++;
       } catch (err) {
         console.error("decideWinner error:", err);
+        await logSystemError("decideWinner", err);
       } finally {
         decidingOrders.delete(order.order_id);
       }
@@ -1358,6 +1431,7 @@ async function refreshOpenOrders() {
   } catch (err) {
     refreshingOrders.clear();
     console.error("refreshOpenOrders error:", err);
+    await logSystemError("refreshOpenOrders", err);
   }
 }
 
@@ -1648,14 +1722,21 @@ async function loadBotSettings() {
 
 const port = process.env.PORT || 3000;
 
-loadBotSettings().then(() => {
-  app.listen(port, () => {
-    console.log("BOT RUNNING:", port);
-    console.log("官方A: ON");
-    console.log("官方B:", hasLineB ? "ON" : "OFF");
-    console.log("Supabase message_jobs: ON");
-    console.log("Web admin page: ON");
-    console.log("Priority: 5min instant > 3min > 7min > countdown");
-    console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
+loadBotSettings()
+  .catch(err => {
+    console.error("loadBotSettings error:", err);
+    console.log("使用預設設定啟動：BOT_ENABLED=true, REFRESH_ENABLED=true");
+    BOT_ENABLED = true;
+    REFRESH_ENABLED = true;
+  })
+  .then(() => {
+    app.listen(port, () => {
+      console.log("BOT RUNNING:", port);
+      console.log("官方A: ON");
+      console.log("官方B:", hasLineB ? "ON" : "OFF");
+      console.log("Supabase message_jobs: ON");
+      console.log("Web admin page: ON");
+      console.log("Priority: 5min instant > 3min > 7min > countdown");
+      console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
+    });
   });
-});
