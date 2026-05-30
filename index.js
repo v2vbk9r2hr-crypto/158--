@@ -146,6 +146,82 @@ function normalizeReportedAddress(address) {
     .trim();
 }
 
+function parseErrandOrder(text) {
+  const lines = text
+    .split(/\n+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+
+  const fullText = lines.join(" ");
+
+  const isErrand =
+    fullText.includes("跑腿") ||
+    fullText.includes("代墊") ||
+    fullText.includes("送到") ||
+    fullText.includes("買");
+
+  if (!isErrand) return null;
+
+  const timeMatch = fullText.match(/(\d{1,2})[.:：](\d{2})/);
+  const reserveTime = timeMatch
+    ? `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}`
+    : "";
+
+  const needAdvance = fullText.includes("需代墊")
+    ? "需代墊"
+    : "不需代墊";
+
+  let payment = "現金";
+  if (fullText.includes("街口")) payment = "街口";
+  if (fullText.includes("轉帳")) payment = "轉帳";
+  if (fullText.includes("現金")) payment = "現金";
+
+  const addressLine =
+    lines.find(line =>
+      /市|縣|區|路|街|巷|號/.test(line) &&
+      !line.includes("百貨") &&
+      !line.includes("商場") &&
+      !line.includes("快閃櫃")
+    ) || "";
+
+  let pickupLine =
+    lines.find(line =>
+      line.includes("百貨") ||
+      line.includes("商場") ||
+      line.includes("快閃櫃") ||
+      line.includes("店") ||
+      line.includes("餐廳")
+    ) || "";
+
+  pickupLine = pickupLine
+    .replace(/^\d{1,2}[.:：]\d{2}/, "")
+    .trim();
+
+  const taskLines = lines.filter(line => {
+    if (line.includes("跑腿")) return false;
+    if (line === "需代墊" || line === "不需代墊") return false;
+    if (line === "街口" || line === "轉帳" || line === "現金") return false;
+    if (line === addressLine) return false;
+    if (line.includes("百貨") || line.includes("商場") || line.includes("快閃櫃")) return false;
+    if (/^\d{1,2}[.:：]\d{2}/.test(line)) return false;
+    return true;
+  });
+
+  const task = taskLines.join("").replace(/對?送到/g, "").trim();
+  const actionText = `${pickupLine}買${task}`.replace(/\s+/g, "");
+
+  const parts = [];
+
+  if (reserveTime) parts.push(reserveTime);
+
+  parts.push(needAdvance);
+  parts.push(actionText || "跑腿服務");
+  parts.push(addressLine || "未提供地址");
+  parts.push(payment);
+
+  return parts.join("/");
+}
+
 async function enqueueMessage({ toId, sourceName = "A", priority = 5, message, orderId = null, jobKey = null }) {
   const payload = {
     to_id: toId,
@@ -561,6 +637,29 @@ async function handleCustomerOrder(event, addressText, clientObj, source) {
       processingOrders.delete(customerLineId);
       return replyText(clientObj, event.replyToken, "已取消您的固定付款方式");
     }
+
+const errandOrderText = parseErrandOrder(addressText);
+
+if (errandOrderText) {
+  const order = await createOrder(errandOrderText, customerLineId, source);
+  totalOrders++;
+
+  processingOrders.delete(customerLineId);
+
+  await replyText(clientObj, event.replyToken, "已建立跑腿單");
+
+  await enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_NEW_ORDER,
+    message: {
+      type: "text",
+      text: `${order.order_code}${order.address}`
+    }
+  });
+
+  return;
+}
 
     const paymentDetected = detectPaymentMethod(addressText);
 
