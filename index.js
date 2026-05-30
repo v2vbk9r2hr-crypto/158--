@@ -13,6 +13,8 @@ const {
   getFirstDriverReport,
   getOrderByCodeAndAddress,
   getOrderByCode,
+  lockReservationWinner,
+  getReservationLock,
   getLatestCustomerOrder,
   upsertCustomerPreference,
   getCustomerPreference,
@@ -507,6 +509,20 @@ function checkDriverCooldown(driverLineId) {
   const lastText = lines[lines.length - 1];
   const plate = lines.length >= 3 ? lines[lines.length - 2] : "";
 
+  const normalizedLastText = chineseNumberToDigit(lastText);
+const isReservationAction =
+  lastText === "準" ||
+  /^(晚|慢)\d+$/.test(normalizedLastText) ||
+  normalizedLastText === "5";
+
+if (isReservationAction && lines.length < 3) {
+  return null;
+}
+
+if (isReservationAction && !plate) {
+  return null;
+}
+
   let addressParts = [];
 
   if (firstLineAddress) addressParts.push(firstLineAddress);
@@ -519,11 +535,10 @@ function checkDriverCooldown(driverLineId) {
 
   if (!address) return null;
 
-  const normalizedLastText = chineseNumberToDigit(lastText);
   const minutesText = normalizedLastText
-    .replace("分鐘", "")
-    .replace("分", "")
-    .trim();
+  .replace("分鐘", "")
+  .replace("分", "")
+  .trim();
 
   const minutes = Number(minutesText);
 
@@ -984,9 +999,14 @@ if (
   (parsed.type === "reservation_late" || parsed.type === "reservation_ready")
 ) {
   const key = order.order_id;
-  const lockedWinner = reservationWinners.get(key);
 
-if (lockedWinner && lockedWinner.driverLineId !== event.source.userId) {
+const lockInfo = await getReservationLock(order.order_id);
+
+if (
+  lockInfo &&
+  lockInfo.reservation_locked &&
+  lockInfo.reservation_driver !== event.source.userId
+) {
   return replyMention(clientObj, event.replyToken, event.source.userId, "X");
 }
 
@@ -1005,12 +1025,11 @@ if (lockedWinner && lockedWinner.driverLineId !== event.source.userId) {
       createdAt: Date.now()
     });
 
-    reservationWinners.set(key, {
-  driverLineId: event.source.userId,
-  plate,
-  reservationText: "準",
-  createdAt: Date.now()
-});
+   await lockReservationWinner(
+  order.order_id,
+  event.source.userId,
+  "ready"
+);
 
     const pending5 = reservationPending5.get(key);
 
@@ -1097,12 +1116,11 @@ if (lockedWinner && lockedWinner.driverLineId !== event.source.userId) {
           minutes: 5
         });
 
-        reservationWinners.set(key, {
-  driverLineId: stillPending.driverLineId,
-  plate: stillPending.plate,
-  reservationText: "晚5",
-  createdAt: Date.now()
-});
+       await lockReservationWinner(
+  order.order_id,
+  stillPending.driverLineId,
+  "late5"
+);
 
         await rememberDriverOrder({
           driverLineId: stillPending.driverLineId,

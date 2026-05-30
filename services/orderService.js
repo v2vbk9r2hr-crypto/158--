@@ -20,16 +20,15 @@ async function createOrder(address, customerLineId, source = "A") {
 
   const { data, error } = await supabase
     .from("orders")
-    .insert([
-      {
-        order_id: orderId,
-        order_code: orderCode,
-        address,
-        customer_line_id: customerLineId,
-        source_name: sourceName,
-        status: "waiting"
-      }
-    ])
+    .insert([{
+      order_id: orderId,
+      order_code: orderCode,
+      address,
+      customer_line_id: customerLineId,
+      source_name: sourceName,
+      status: "waiting",
+      reservation_locked: false
+    }])
     .select()
     .single();
 
@@ -49,20 +48,9 @@ async function getOrderByCodeAndAddress(orderCode, address) {
     .maybeSingle();
 
   if (error) throw error;
-
   if (data) return data;
 
-  const { data: fallback, error: fallbackError } = await supabase
-    .from("orders")
-    .select("*")
-    .eq("order_code", orderCode)
-    .neq("status", "completed")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (fallbackError) throw fallbackError;
-  return fallback;
+  return getOrderByCode(orderCode);
 }
 
 async function getOrderByCode(orderCode) {
@@ -73,6 +61,33 @@ async function getOrderByCode(orderCode) {
     .neq("status", "completed")
     .order("created_at", { ascending: false })
     .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function lockReservationWinner(orderId, driverLineId, status) {
+  const { data, error } = await supabase
+    .from("orders")
+    .update({
+      reservation_locked: true,
+      reservation_driver: driverLineId,
+      reservation_status: status
+    })
+    .eq("order_id", orderId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function getReservationLock(orderId) {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("reservation_locked,reservation_driver,reservation_status")
+    .eq("order_id", orderId)
     .maybeSingle();
 
   if (error) throw error;
@@ -122,26 +137,17 @@ async function getCustomerPreference(customerLineId) {
   return data;
 }
 
-async function addDriverReport({
-  orderId,
-  orderCode,
-  address,
-  driverLineId,
-  plate,
-  minutes
-}) {
+async function addDriverReport({ orderId, orderCode, address, driverLineId, plate, minutes }) {
   const { data, error } = await supabase
     .from("driver_reports")
-    .insert([
-      {
-        order_id: orderId,
-        order_code: orderCode,
-        address,
-        driver_line_id: driverLineId,
-        plate,
-        minutes
-      }
-    ])
+    .insert([{
+      order_id: orderId,
+      order_code: orderCode,
+      address,
+      driver_line_id: driverLineId,
+      plate,
+      minutes
+    }])
     .select()
     .single();
 
@@ -165,9 +171,7 @@ async function getFirstDriverReport(orderId) {
 async function assignWinnerDriver(orderId) {
   const { data, error } = await supabase
     .from("orders")
-    .update({
-      decision_started: true
-    })
+    .update({ decision_started: true })
     .eq("order_id", orderId)
     .select()
     .single();
@@ -204,10 +208,7 @@ async function decideWinner(orderId) {
 
   if (orderError) throw orderError;
 
-  return {
-    order,
-    winner
-  };
+  return { order, winner };
 }
 
 async function overrideDriver({ order, driverLineId, plate, minutes }) {
@@ -238,7 +239,10 @@ async function resetOrderForReDispatch(orderId) {
       assigned_plate: null,
       assigned_minutes: null,
       assigned_at: null,
-      decision_started: false
+      decision_started: false,
+      reservation_locked: false,
+      reservation_driver: null,
+      reservation_status: null
     })
     .eq("order_id", orderId)
     .select()
@@ -265,14 +269,11 @@ async function markOrderRefreshed(orderId) {
 
 async function cancelLatestCustomerOrder(customerLineId) {
   const order = await getLatestCustomerOrder(customerLineId);
-
   if (!order) return null;
 
   const { data, error } = await supabase
     .from("orders")
-    .update({
-      status: "canceled"
-    })
+    .update({ status: "canceled" })
     .eq("order_id", order.order_id)
     .select()
     .single();
@@ -292,14 +293,7 @@ async function getDriverCurrentOrder(driverLineId) {
   return data;
 }
 
-async function upsertDriverCurrentOrder({
-  driverLineId,
-  orderId,
-  orderCode,
-  address,
-  plate,
-  status = "assigned"
-}) {
+async function upsertDriverCurrentOrder({ driverLineId, orderId, orderCode, address, plate, status = "assigned" }) {
   const { data, error } = await supabase
     .from("driver_current_orders")
     .upsert(
@@ -312,9 +306,7 @@ async function upsertDriverCurrentOrder({
         status,
         updated_at: new Date().toISOString()
       },
-      {
-        onConflict: "driver_line_id"
-      }
+      { onConflict: "driver_line_id" }
     )
     .select()
     .single();
@@ -343,9 +335,7 @@ async function setBotSetting(key, value) {
         value,
         updated_at: new Date().toISOString()
       },
-      {
-        onConflict: "key"
-      }
+      { onConflict: "key" }
     )
     .select()
     .single();
@@ -358,6 +348,8 @@ module.exports = {
   createOrder,
   getOrderByCodeAndAddress,
   getOrderByCode,
+  lockReservationWinner,
+  getReservationLock,
   getLatestCustomerOrder,
   upsertCustomerPreference,
   getCustomerPreference,
