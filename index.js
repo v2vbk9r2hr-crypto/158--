@@ -20,6 +20,7 @@ const {
   markOrderRefreshed,
   cancelLatestCustomerOrder,
   assignWinnerDriver,
+  overrideDriver,
   upsertDriverCurrentOrder,
   getBotSetting,
   setBotSetting
@@ -39,6 +40,8 @@ let BOT_ENABLED = true;
 let REFRESH_ENABLED = true;
 
 const COMPETE_DIFF_MINUTES = 3;
+const OVERRIDE_DIFF_MINUTES = 7;
+
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 1;
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
@@ -764,6 +767,44 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     throw err;
   }
 
+  if (
+    order.status === "assigned" &&
+    order.assigned_driver_line_id &&
+    order.assigned_minutes
+  ) {
+    const currentWinnerMinutes = Number(order.assigned_minutes);
+
+    if (currentWinnerMinutes - minutes >= OVERRIDE_DIFF_MINUTES) {
+      const oldDriverId = order.assigned_driver_line_id;
+
+      const updatedOrder = await overrideDriver({
+        order,
+        driverLineId: event.source.userId,
+        plate,
+        minutes
+      });
+
+      await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+
+      await queueGroupMention(
+        oldDriverId,
+        "X",
+        order.order_id,
+        PRIORITY_OVERRIDE_SPRAY
+      );
+
+      await pushCustomerDispatch(
+        updatedOrder.customer_line_id,
+        plate,
+        minutes,
+        orderSource
+      );
+
+      totalAssigned++;
+      return;
+    }
+  }
+
   if (!order.decision_started && !decidingOrders.has(order.order_id)) {
     await assignWinnerDriver(order.order_id);
 
@@ -887,7 +928,7 @@ loadBotSettings().then(() => {
     console.log("官方A: ON");
     console.log("官方B:", hasLineB ? "ON" : "OFF");
     console.log("Supabase message_jobs: ON");
-    console.log("Priority: countdown > order > refresh");
+    console.log("Priority: 3min > 7min > countdown > refresh");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
