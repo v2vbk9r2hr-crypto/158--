@@ -59,6 +59,8 @@ const PRIORITY_REFRESH = 9;
 const clients = new Map();
 const pendingReservationChanges = new Map();
 const reservationWinners = new Map();
+const reservationPending5 = new Map();
+const reservationReadyWinners = new Map();
 const processingOrders = new Set();
 const refreshingOrders = new Set();
 const decidingOrders = new Set();
@@ -481,40 +483,47 @@ function checkDriverCooldown(driverLineId) {
   return true;
 }
 
-function parseStrictDriverMessage(text) {
-  const clean = text.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-  const parts = clean.split(" ").filter(Boolean);
+ function parseStrictDriverMessage(text) {
+  const lines = String(text)
+    .split(/\n+/)
+    .map(v => v.trim())
+    .filter(Boolean);
 
-  if (parts.length < 3) return null;
+  if (lines.length < 2) return null;
 
-  const firstToken = parts[0];
-  const codeMatch = firstToken.match(/^(#[A-Z]\d+)/i);
+  const firstLine = lines[0];
+  const codeMatch = firstLine.match(/^(#[A-Z]\d+)/i);
   if (!codeMatch) return null;
 
- let orderCode = codeMatch[1].toUpperCase();
-if (!orderCode.endsWith("/")) orderCode += "/";
+  let orderCode = codeMatch[1].toUpperCase();
+  if (!orderCode.endsWith("/")) orderCode += "/";
 
-const inlineAddress = firstToken
-  .slice(codeMatch[1].length)
-  .replace(/^\//, "")
-  .trim();
+  const firstLineAddress = firstLine
+    .slice(codeMatch[1].length)
+    .replace(/^\//, "")
+    .trim();
 
-  const lastText = parts[parts.length - 1];
-  const plate = parts[parts.length - 2];
+  const lastText = lines[lines.length - 1];
+  const plate = lines.length >= 3 ? lines[lines.length - 2] : "";
 
-  let address = "";
+  let addressParts = [];
 
-  if (inlineAddress) {
-    address = [inlineAddress, ...parts.slice(1, parts.length - 2)].join(" ").trim();
-  } else {
-    if (parts.length < 4) return null;
-    address = parts.slice(1, parts.length - 2).join(" ").trim();
+  if (firstLineAddress) addressParts.push(firstLineAddress);
+
+  if (lines.length >= 4) {
+    addressParts = addressParts.concat(lines.slice(1, lines.length - 2));
   }
 
-  if (!address || !plate) return null;
+  const address = addressParts.join("").replace(/\s+/g, " ").trim();
+
+  if (!address) return null;
 
   const normalizedLastText = chineseNumberToDigit(lastText);
-  const minutesText = normalizedLastText.replace("分鐘", "").replace("分", "").trim();
+  const minutesText = normalizedLastText
+    .replace("分鐘", "")
+    .replace("分", "")
+    .trim();
+
   const minutes = Number(minutesText);
 
   if (/^(晚|慢)\d+$/.test(normalizedLastText)) {
@@ -973,27 +982,34 @@ if (
   isReservationOrder &&
   (parsed.type === "reservation_late" || parsed.type === "reservation_ready")
 ) {
-    const key = order.order_id;
-    const oldWinner = reservationWinners.get(key);
+  const key = order.order_id;
 
-    if (
-      parsed.type === "reservation_ready" &&
-      oldWinner &&
-      oldWinner.driverLineId !== event.source.userId
-    ) {
+  // 準：誰先報準誰贏
+  if (parsed.type === "reservation_ready") {
+    const existingReady = reservationReadyWinners.get(key);
+
+    if (existingReady) {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+
+    reservationReadyWinners.set(key, {
+      driverLineId: event.source.userId,
+      plate,
+      reservationText: parsed.reservationText,
+      createdAt: Date.now()
+    });
+
+    const pending5 = reservationPending5.get(key);
+
+    if (pending5 && pending5.driverLineId !== event.source.userId) {
       await queueGroupMention(
-        oldWinner.driverLineId,
+        pending5.driverLineId,
         "X",
         order.order_id,
         PRIORITY_OVERRIDE_SPRAY
       );
+      reservationPending5.delete(key);
     }
-
-    reservationWinners.set(key, {
-      driverLineId: event.source.userId,
-      plate,
-      reservationText: parsed.reservationText
-    });
 
     const updatedOrder = await overrideDriver({
       order,
@@ -1015,13 +1031,92 @@ if (
     await pushCustomerDispatch(
       updatedOrder.customer_line_id,
       plate,
-      parsed.reservationText,
+      "準",
       orderSource
     );
 
     totalAssigned++;
     return;
   }
+
+  // 晚5 / 報5：先等7秒
+  if (parsed.type === "reservation_late") {
+    const normalizedText = chineseNumberToDigit(parsed.reservationText);
+    const lateMatch = normalizedText.match(/^(晚|慢)(\d+)$/);
+    const lateMinutes = lateMatch ? Number(lateMatch[2]) : null;
+
+    if (lateMinutes !== 5) {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+
+    const existingReady = reservationReadyWinners.get(key);
+    if (existingReady) {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+
+    const existingPending5 = reservationPending5.get(key);
+    if (existingPending5) {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+
+    reservationPending5.set(key, {
+      driverLineId: event.source.userId,
+      plate,
+      reservationText: parsed.reservationText,
+      createdAt: Date.now()
+    });
+
+    setTimeout(async () => {
+      try {
+        const stillPending = reservationPending5.get(key);
+        const readyWinner = reservationReadyWinners.get(key);
+
+        if (!stillPending) return;
+        if (readyWinner) {
+          reservationPending5.delete(key);
+          return;
+        }
+
+        const updatedOrder = await overrideDriver({
+          order,
+          driverLineId: stillPending.driverLineId,
+          plate: stillPending.plate,
+          minutes: 5
+        });
+
+        await rememberDriverOrder({
+          driverLineId: stillPending.driverLineId,
+          order: updatedOrder,
+          orderCode,
+          address,
+          plate: stillPending.plate
+        });
+
+        await queueGroupMention(
+          stillPending.driverLineId,
+          "噴",
+          order.order_id,
+          PRIORITY_COUNTDOWN_SPRAY
+        );
+
+        await pushCustomerDispatch(
+          updatedOrder.customer_line_id,
+          stillPending.plate,
+          "晚5",
+          orderSource
+        );
+
+        reservationPending5.delete(key);
+        totalAssigned++;
+      } catch (err) {
+        console.error("reservation pending5 error:", err);
+        reservationPending5.delete(key);
+      }
+    }, 7000);
+
+    return;
+  }
+} 
 
   if (Number.isFinite(minutes) && minutes <= 5) {
     try {
