@@ -738,6 +738,56 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
     return;
   }
 
+if (Number(minutes) <= 5) {
+  try {
+    await addDriverReport({
+      orderId: order.order_id,
+      orderCode,
+      address,
+      driverLineId: event.source.userId,
+      plate,
+      minutes
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+    }
+    throw err;
+  }
+
+  const updatedOrder = await overrideDriver({
+    order,
+    driverLineId: event.source.userId,
+    plate,
+    minutes
+  });
+
+  await rememberDriverOrder({
+    driverLineId: event.source.userId,
+    order: updatedOrder,
+    orderCode,
+    address,
+    plate
+  });
+
+  await replyMention(
+    clientObj,
+    event.replyToken,
+    event.source.userId,
+    "噴"
+  );
+
+  await pushCustomerDispatch(
+    updatedOrder.customer_line_id,
+    plate,
+    minutes,
+    orderSource
+  );
+
+  totalAssigned++;
+  return;
+}
+
   const firstReport = await getFirstDriverReport(order.order_id);
 
   if (firstReport && firstReport.driver_line_id !== event.source.userId) {
@@ -928,7 +978,7 @@ loadBotSettings().then(() => {
     console.log("官方A: ON");
     console.log("官方B:", hasLineB ? "ON" : "OFF");
     console.log("Supabase message_jobs: ON");
-    console.log("Priority: 3min > 7min > countdown > refresh");
+    console.log("Priority: 5min instant > 3min > 7min > countdown");
     console.log("Google API:", GOOGLE_API_ENABLED ? "ON" : "OFF");
   });
 });
