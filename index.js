@@ -481,8 +481,8 @@ function parseStrictDriverMessage(text) {
   const codeMatch = firstToken.match(/^(#[A-Z]\d+)/i);
   if (!codeMatch) return null;
 
-  const orderCode = codeMatch[1].toUpperCase();
-  const inlineAddress = firstToken.slice(codeMatch[1].length).replace(/^\//, "").trim();
+  let orderCode = codeMatch[1].toUpperCase();
+if (!orderCode.endsWith("/")) orderCode += "/";
 
   const lastText = parts[parts.length - 1];
   const plate = parts[parts.length - 2];
