@@ -258,12 +258,22 @@ async function enqueueMessage({ toId, sourceName = "A", priority = 5, message, o
     job_key: jobKey
   };
 
-  const query = supabase.from("message_jobs");
-  const { error } = jobKey
-    ? await query.upsert(payload, { onConflict: "job_key" })
-    : await query.insert(payload);
+  let result;
 
-  if (error) throw error;
+  if (jobKey) {
+    result = await supabase
+      .from("message_jobs")
+      .upsert(payload, {
+        onConflict: "job_key",
+        ignoreDuplicates: false
+      });
+  } else {
+    result = await supabase
+      .from("message_jobs")
+      .insert(payload);
+  }
+
+  if (result.error) throw result.error;
 }
 
 async function queueRefreshText(to, text, source = "A") {
@@ -946,14 +956,15 @@ if (!order && (parsed.type === "reservation_late" || parsed.type === "reservatio
     return;
   }
 
- const orderAddress = String(order.address || "");
+ const orderAddress = `${order.order_code || ""}${order.address || ""}`;
 
 const isErrandReservation =
-  orderAddress.startsWith("跑腿/") &&
-  /^\d{2}:\d{2}\//.test(orderAddress.replace("跑腿/", ""));
+  orderAddress.includes("/跑腿/") &&
+  /\d{1,2}:\d{2}/.test(orderAddress);
 
 const isNormalReservation =
-  orderAddress.startsWith("預約/");
+  orderAddress.includes("/預約/") &&
+  /\d{1,2}:\d{2}/.test(orderAddress);
 
 const isReservationOrder =
   isErrandReservation || isNormalReservation;
