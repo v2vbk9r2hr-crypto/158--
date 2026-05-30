@@ -55,6 +55,7 @@ const PRIORITY_REFRESH = 9;
 
 const clients = new Map();
 const pendingReservationChanges = new Map();
+const reservationWinners = new Map();
 const processingOrders = new Set();
 const refreshingOrders = new Set();
 const decidingOrders = new Set();
@@ -373,6 +374,14 @@ function parseStrictDriverMessage(text) {
 
   const minutesText = lastText.replace("分鐘", "").replace("分", "").trim();
   const minutes = Number(minutesText);
+
+if (/^(晚|慢)\d+$/.test(lastText)) {
+  return { type: "reservation_late", orderCode, address, plate, reservationText: lastText };
+}
+
+if (lastText === "準") {
+  return { type: "reservation_ready", orderCode, address, plate, reservationText: lastText };
+}
 
   if (Number.isFinite(minutes) && minutes > 0) {
     return { type: "report", orderCode, address, plate, minutes };
@@ -737,6 +746,57 @@ async function handleDriverReport(event, text, clientObj, parsedStrict = null) {
 
     return;
   }
+if (parsed.type === "reservation_late" || parsed.type === "reservation_ready") {
+  const key = order.order_id;
+  const oldWinner = reservationWinners.get(key);
+
+  if (parsed.type === "reservation_ready" && oldWinner && oldWinner.driverLineId !== event.source.userId) {
+    await queueGroupMention(
+      oldWinner.driverLineId,
+      "X",
+      order.order_id,
+      PRIORITY_OVERRIDE_SPRAY
+    );
+  }
+
+  reservationWinners.set(key, {
+    driverLineId: event.source.userId,
+    plate,
+    reservationText: parsed.reservationText
+  });
+
+  const updatedOrder = await overrideDriver({
+    order,
+    driverLineId: event.source.userId,
+    plate,
+    minutes: 0
+  });
+
+  await rememberDriverOrder({
+    driverLineId: event.source.userId,
+    order: updatedOrder,
+    orderCode,
+    address,
+    plate
+  });
+
+  await replyMention(
+    clientObj,
+    event.replyToken,
+    event.source.userId,
+    "噴"
+  );
+
+  await pushCustomerDispatch(
+    updatedOrder.customer_line_id,
+    plate,
+    parsed.reservationText,
+    orderSource
+  );
+
+  totalAssigned++;
+  return;
+}
 
 if (Number(minutes) <= 5) {
   try {
