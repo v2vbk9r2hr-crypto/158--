@@ -360,6 +360,15 @@ async function queueGroupMention(userId, text, orderId = null, priority = PRIORI
   });
 }
 
+async function markSprayConfirmed(orderId) {
+  if (!orderId) return;
+
+  await supabase
+    .from("orders")
+    .update({ spray_confirmed: true })
+    .eq("order_id", orderId);
+}
+
 async function markCustomerDispatchNotified(orderId) {
   if (!orderId) return;
 
@@ -842,10 +851,10 @@ async function handleEvent(event, clientObj, source) {
   const text = event.message.text.trim();
   if (!text) return;
 
-  const controlled = await handleBotControl(event, text, clientObj);
-  if (controlled) return;
-
   if (event.source.type === "group") {
+    const controlled = await handleBotControl(event, text, clientObj);
+    if (controlled) return;
+
     if (event.source.groupId !== DRIVER_GROUP_ID) return;
     if (!BOT_ENABLED) return;
 
