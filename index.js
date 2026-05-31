@@ -513,7 +513,8 @@ async function processMessageJobs() {
           .from("bot_accounts")
           .update({
             last_used_at: new Date().toISOString(),
-            last_error: null
+            last_error: null,
+            fail_count: 0
           })
           .eq("id", bot.id);
 
@@ -526,13 +527,23 @@ async function processMessageJobs() {
         lastErrorStatus = status;
         lastErrorData = data;
 
-        await supabase
-          .from("bot_accounts")
-          .update({
-            last_error: typeof data === "string" ? data : JSON.stringify(data)
-          })
-          .eq("id", bot.id);
+        const newFailCount = Number(bot.fail_count || 0) + 1;
 
+const updateData = {
+  fail_count: newFailCount,
+  last_error: typeof data === "string" ? data : JSON.stringify(data)
+};
+
+if (newFailCount >= 10) {
+  updateData.status = "disabled";
+  updateData.disabled_at = new Date().toISOString();
+}
+
+await supabase
+  .from("bot_accounts")
+  .update(updateData)
+  .eq("id", bot.id);
+  
         if (status === 429) {
           total429++;
           continue;
