@@ -1454,47 +1454,56 @@ if (isReservationOrder && parsed.type === "report") {
 
     throw err;
   }
+  
+    if (
+  order.status === "assigned" &&
+  order.assigned_driver_line_id &&
+  order.assigned_minutes !== null &&
+  order.assigned_minutes !== undefined
+) {
+  const currentWinnerMinutes = Number(order.assigned_minutes);
 
-  if (
-    order.status === "assigned" &&
-    order.assigned_driver_line_id &&
-    order.assigned_minutes
-  ) {
-    const currentWinnerMinutes = Number(order.assigned_minutes);
+  if (currentWinnerMinutes - minutes >= OVERRIDE_DIFF_MINUTES) {
+    const oldDriverId = order.assigned_driver_line_id;
 
-    if (currentWinnerMinutes - minutes >= OVERRIDE_DIFF_MINUTES) {
-      const oldDriverId = order.assigned_driver_line_id;
+    const updatedOrder = await overrideDriver({
+      order,
+      driverLineId: event.source.userId,
+      plate,
+      minutes
+    });
 
-      const updatedOrder = await overrideDriver({
-        order,
-        driverLineId: event.source.userId,
-        plate,
-        minutes
-      });
+    await queueGroupMention(
+      oldDriverId,
+      "X",
+      order.order_id,
+      PRIORITY_OVERRIDE_SPRAY
+    );
 
-      await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
-      await markSprayConfirmed(updatedOrder.order_id);
+    await queueGroupMention(
+      event.source.userId,
+      "噴",
+      updatedOrder.order_id,
+      PRIORITY_OVERRIDE_SPRAY
+    );
 
-      await queueGroupMention(
-        oldDriverId,
-        "X",
-        order.order_id,
-        PRIORITY_OVERRIDE_SPRAY
-      );
+    await markSprayConfirmed(updatedOrder.order_id);
 
-      await pushCustomerDispatch(
-        updatedOrder.customer_line_id,
-        plate,
-        minutes,
-        orderSource
-      );
+    await pushCustomerDispatch(
+      updatedOrder.customer_line_id,
+      plate,
+      minutes,
+      orderSource
+    );
 
-      await markCustomerDispatchNotified(updatedOrder.order_id);
+    await markCustomerDispatchNotified(updatedOrder.order_id);
 
-      totalAssigned++;
-      return;
-    }
+    totalAssigned++;
+    return;
   }
+
+  return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+}
 
   if (!order.decision_started && !decidingOrders.has(order.order_id)) {
     await assignWinnerDriver(order.order_id);
