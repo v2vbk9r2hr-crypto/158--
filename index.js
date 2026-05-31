@@ -489,9 +489,10 @@ async function processMessageJobs() {
     claimed = data;
 
     const { data: bots, error: botError } = await supabase
-      .from("bot_accounts")
-      .select("*")
-      .eq("status", "active")
+     .from("bot_accounts")
+     .select("*")
+     .eq("status", "active")
+     .eq("source_name", claimed.source_name)
       .order("last_used_at", { ascending: true, nullsFirst: true })
 .order("id", { ascending: true })
 .limit(10);
