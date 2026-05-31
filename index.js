@@ -393,6 +393,18 @@ async function pushCustomerDispatch(customerLineId, plate, minutes, source = "A"
   });
 }
 
+async function pushCustomerFasterDispatch(customerLineId, plate, minutes, source = "A") {
+  return enqueueMessage({
+    toId: customerLineId,
+    sourceName: source,
+    priority: PRIORITY_CUSTOMER,
+    message: {
+      type: "text",
+      text: `已幫您找到更快的司機，會提早抵達\n車牌:${plate}\n約${minutes}分鐘`
+    }
+  });
+}
+
 async function pushCustomerArrived(customerLineId, plate, source = "A") {
   return enqueueMessage({
     toId: customerLineId,
@@ -1496,12 +1508,12 @@ if (
 
     await markSprayConfirmed(updatedOrder.order_id);
 
-    await pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      minutes,
-      orderSource
-    );
+    await pushCustomerFasterDispatch(
+  updatedOrder.customer_line_id,
+  plate,
+  minutes,
+  orderSource
+);
 
     await markCustomerDispatchNotified(updatedOrder.order_id);
 
