@@ -54,6 +54,8 @@ const REFRESH_ORDER_DELAY_MS = 3000; // 每張刷單間隔3秒，降低429
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
 const RESPRAY_CHECK_INTERVAL_MS = 30 * 1000;
+const REPAIR_DECISION_INTERVAL_MS = 30 * 1000;
+const DECISION_STUCK_MS = 20 * 1000;
 const BOT_FAIL_HOLD_MS = 5 * 60 * 1000; // Bot壞掉時，訊息保留5分鐘後再試
 
 const PRIORITY_OVERRIDE_SPRAY = 2;
@@ -358,12 +360,12 @@ async function queueGroupMention(userId, text, orderId = null, priority = PRIORI
   });
 }
 
-async function markSprayConfirmed(orderId) {
+async function markCustomerDispatchNotified(orderId) {
   if (!orderId) return;
 
   await supabase
     .from("orders")
-    .update({ spray_confirmed: true })
+    .update({ customer_dispatch_notified: true })
     .eq("order_id", orderId);
 }
 
@@ -543,7 +545,7 @@ await supabase
   .from("bot_accounts")
   .update(updateData)
   .eq("id", bot.id);
-  
+
         if (status === 429) {
           total429++;
           continue;
@@ -1244,6 +1246,8 @@ if (
   orderSource
 );
 
+await markCustomerDispatchNotified(updatedOrder.order_id);
+
     totalAssigned++;
     return;
   }
@@ -1332,6 +1336,8 @@ await markSprayConfirmed(updatedOrder.order_id);
           orderSource
         );
 
+        await markCustomerDispatchNotified(updatedOrder.order_id);
+
         reservationPending5.delete(key);
         totalAssigned++;
       } catch (err) {
@@ -1394,6 +1400,8 @@ if (isReservationOrder && parsed.type === "report") {
       minutes,
       orderSource
     );
+
+    await markCustomerDispatchNotified(updatedOrder.order_id);
 
     totalAssigned++;
     return;
@@ -1462,6 +1470,8 @@ if (isReservationOrder && parsed.type === "report") {
         orderSource
       );
 
+      await markCustomerDispatchNotified(updatedOrder.order_id);
+
       totalAssigned++;
       return;
     }
@@ -1510,6 +1520,8 @@ if (isReservationOrder && parsed.type === "report") {
           winnerSource
         );
 
+        await markCustomerDispatchNotified(assignedOrder.order_id);
+
         totalAssigned++;
       } catch (err) {
         console.error("decideWinner error:", err);
@@ -1552,6 +1564,81 @@ async function repairMissingSprayJobs() {
   } catch (err) {
     console.error("repairMissingSprayJobs error:", err);
     await logSystemError("repairMissingSprayJobs", err);
+  }
+}
+
+async function repairStuckDecisions() {
+  try {
+    if (!BOT_ENABLED) return;
+
+    const stuckBefore = new Date(Date.now() - DECISION_STUCK_MS).toISOString();
+
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("status", "waiting")
+      .eq("decision_started", true)
+      .lt("updated_at", stuckBefore)
+      .limit(10);
+
+    if (error) throw error;
+    if (!orders || orders.length === 0) return;
+
+    for (const order of orders) {
+      if (decidingOrders.has(order.order_id)) continue;
+
+      decidingOrders.add(order.order_id);
+
+      try {
+        const result = await decideWinner(order.order_id);
+
+        if (!result) {
+          decidingOrders.delete(order.order_id);
+          continue;
+        }
+
+        const { order: assignedOrder, winner } = result;
+        const winnerSource = assignedOrder.source_name || order.source_name || "A";
+
+        await rememberDriverOrder({
+          driverLineId: winner.driver_line_id,
+          order: assignedOrder,
+          orderCode: winner.order_code,
+          address: winner.address,
+          plate: winner.plate
+        });
+
+        await queueGroupMention(
+          winner.driver_line_id,
+          "噴",
+          assignedOrder.order_id,
+          PRIORITY_COUNTDOWN_SPRAY
+        );
+
+        await markSprayConfirmed(assignedOrder.order_id);
+
+        if (!assignedOrder.customer_dispatch_notified) {
+  await pushCustomerDispatch(
+    assignedOrder.customer_line_id,
+    winner.plate,
+    winner.minutes,
+    winnerSource
+  );
+
+  await markCustomerDispatchNotified(assignedOrder.order_id);
+}
+
+        totalAssigned++;
+      } catch (err) {
+        console.error("repairStuckDecisions item error:", err);
+        await logSystemError("repairStuckDecisions:item", err);
+      } finally {
+        decidingOrders.delete(order.order_id);
+      }
+    }
+  } catch (err) {
+    console.error("repairStuckDecisions error:", err);
+    await logSystemError("repairStuckDecisions", err);
   }
 }
 
@@ -1871,6 +1958,7 @@ app.post("/admin/action", async (req, res) => {
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 setInterval(repairMissingSprayJobs, RESPRAY_CHECK_INTERVAL_MS);
+setInterval(repairStuckDecisions, REPAIR_DECISION_INTERVAL_MS);
 
 setInterval(() => {
   console.log(`429:${total429}\nGoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`);
