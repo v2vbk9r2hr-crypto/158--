@@ -1377,23 +1377,30 @@ if (isReservationOrder && parsed.type === "report") {
     "X"
   );
 }
+const firstReportBeforeInstant = await getFirstDriverReport(order.order_id);
 
-  if (Number.isFinite(minutes) && minutes <= 5) {
-    try {
-      await addDriverReport({
-        orderId: order.order_id,
-        orderCode,
-        address,
-        driverLineId: event.source.userId,
-        plate,
-        minutes
-      });
-    } catch (err) {
-      if (err.code === "23505") {
-        return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-      }
-      throw err;
-    }
+if (
+  Number.isFinite(minutes) &&
+  minutes <= 5 &&
+  !firstReportBeforeInstant &&
+  !order.decision_started &&
+  order.status !== "assigned"
+) {
+  try {
+  await addDriverReport({
+    orderId: order.order_id,
+    orderCode,
+    address,
+    driverLineId: event.source.userId,
+    plate,
+    minutes
+  });
+} catch (err) {
+  if (err.code === "23505") {
+    return replyMention(clientObj, event.replyToken, event.source.userId, "X");
+  }
+  throw err;
+}
 
     const updatedOrder = await overrideDriver({
       order,
@@ -1454,7 +1461,7 @@ if (isReservationOrder && parsed.type === "report") {
 
     throw err;
   }
-  
+
     if (
   order.status === "assigned" &&
   order.assigned_driver_line_id &&
@@ -1521,23 +1528,29 @@ if (isReservationOrder && parsed.type === "report") {
 
         if (!result) return;
 
-        const { order: assignedOrder, winner } = result;
+        const {
+  order: assignedOrder,
+  winner,
+  losers
+} = result;
         const winnerSource = assignedOrder.source_name || orderSource || "A";
 
-        await rememberDriverOrder({
-          driverLineId: winner.driver_line_id,
-          order: assignedOrder,
-          orderCode: winner.order_code,
-          address: winner.address,
-          plate: winner.plate
-        });
 
-        await queueGroupMention(
-          winner.driver_line_id,
-          "噴",
-          assignedOrder.order_id,
-          PRIORITY_COUNTDOWN_SPRAY
-        );
+for (const loser of losers) {
+  await queueGroupMention(
+    loser.driver_line_id,
+    "X",
+    assignedOrder.order_id,
+    PRIORITY_COUNTDOWN_SPRAY
+  );
+}
+
+await queueGroupMention(
+  winner.driver_line_id,
+  "噴",
+  assignedOrder.order_id,
+  PRIORITY_COUNTDOWN_SPRAY
+);
 
         await markSprayConfirmed(assignedOrder.order_id);
 
@@ -1626,16 +1639,21 @@ async function repairStuckDecisions() {
           continue;
         }
 
-        const { order: assignedOrder, winner } = result;
-        const winnerSource = assignedOrder.source_name || order.source_name || "A";
+        const {
+  order: assignedOrder,
+  winner,
+  losers
+} = result;
+        const winnerSource = assignedOrder.source_name || order.source_name || "A";;
 
-        await rememberDriverOrder({
-          driverLineId: winner.driver_line_id,
-          order: assignedOrder,
-          orderCode: winner.order_code,
-          address: winner.address,
-          plate: winner.plate
-        });
+for (const loser of losers) {
+  await queueGroupMention(
+    loser.driver_line_id,
+    "X",
+    assignedOrder.order_id,
+    PRIORITY_COUNTDOWN_SPRAY
+  );
+}
 
         await queueGroupMention(
           winner.driver_line_id,

@@ -208,7 +208,15 @@ async function decideWinner(orderId) {
 
   if (orderError) throw orderError;
 
-  return { order, winner };
+  const losers = reports.filter(
+  r => r.driver_line_id !== winner.driver_line_id
+);
+
+return {
+  order,
+  winner,
+  losers
+};
 }
 
 async function overrideDriver({ order, driverLineId, plate, minutes }) {
