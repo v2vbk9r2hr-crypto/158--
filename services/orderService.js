@@ -9,14 +9,14 @@ async function createOrder(address, customerLineId, source = "A") {
   const sourceName = source || "A";
   const orderId = makeOrderId();
 
-  const { count, error: countError } = await supabase
-    .from("orders")
-    .select("*", { count: "exact", head: true })
-    .eq("source_name", sourceName);
+  const { data: nextNo, error: counterError } = await supabase
+    .rpc("next_order_number", {
+      p_source_name: sourceName
+    });
 
-  if (countError) throw countError;
+  if (counterError) throw counterError;
 
-  const orderCode = `#${sourceName}${(count || 0) + 1}/`;
+  const orderCode = `#${sourceName}${nextNo}/`;
 
   const { data, error } = await supabase
     .from("orders")
@@ -279,6 +279,11 @@ async function markOrderRefreshed(orderId) {
 async function cancelLatestCustomerOrder(customerLineId) {
   const order = await getLatestCustomerOrder(customerLineId);
   if (!order) return null;
+
+  await supabase
+    .from("driver_reports")
+    .delete()
+    .eq("order_id", order.order_id);
 
   const { data, error } = await supabase
     .from("orders")

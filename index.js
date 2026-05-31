@@ -50,8 +50,8 @@ const OVERRIDE_DIFF_MINUTES = 7;
 
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 30;
-const REFRESH_ORDER_DELAY_MS = 3000; // 每張刷單間隔3秒，降低429
-const MESSAGE_WORKER_INTERVAL_MS = 800;
+const REFRESH_ORDER_DELAY_MS = 4000; // 每張刷單間隔3秒，降低429
+const MESSAGE_WORKER_INTERVAL_MS = 1200;
 const MESSAGE_JOB_BATCH_SIZE = 20;
 const MAX_RETRY = 5;
 const RESPRAY_CHECK_INTERVAL_MS = 30 * 1000;
@@ -449,7 +449,6 @@ async function pushAskDriverReservationChange(order, reservationTime, paymentTex
 }
 
 async function processMessageJobs() {
-
   if (!BOT_ENABLED) return;
   if (messageWorkerRunning) return;
 
@@ -483,6 +482,8 @@ async function processMessageJobs() {
     if (!jobs || jobs.length === 0) return;
 
     for (const job of jobs) {
+      if (!BOT_ENABLED) break;
+
       let claimed = null;
       let lastErrorStatus = null;
       let lastErrorData = null;
@@ -574,7 +575,6 @@ async function processMessageJobs() {
               .eq("id", bot.id);
 
             if (status === 429) total429++;
-
             continue;
           }
         }
@@ -597,56 +597,49 @@ async function processMessageJobs() {
         if (status === 429) total429++;
 
         if (claimed) {
+          const currentRetry = Number(claimed.retry_count || 0) + 1;
 
-  const currentRetry =
-    Number(claimed.retry_count || 0) + 1;
+          const retryDelayMs =
+            status === 429
+              ? 60000
+              : BOT_FAIL_HOLD_MS;
 
-  const retryDelayMs =
-    status === 429
-      ? 60000
-      : BOT_FAIL_HOLD_MS;
+          if (currentRetry >= MAX_RETRY) {
+            await supabase
+              .from("message_jobs")
+              .update({
+                status: "failed",
+                locked_at: null,
+                retry_count: currentRetry,
+                error_message:
+                  typeof data === "string"
+                    ? data
+                    : JSON.stringify(data)
+              })
+              .eq("id", claimed.id);
 
-  if (currentRetry >= MAX_RETRY) {
+            continue;
+          }
 
-    await supabase
-      .from("message_jobs")
-      .update({
-        status: "failed",
-        locked_at: null,
-        retry_count: currentRetry,
-        error_message:
-          typeof data === "string"
-            ? data
-            : JSON.stringify(data)
-      })
-      .eq("id", claimed.id);
-
-    continue;
-  }
-
-  await supabase
-    .from("message_jobs")
-    .update({
-      status: "pending",
-      locked_at: null,
-      retry_count: currentRetry,
-      next_retry_at: new Date(
-        Date.now() + retryDelayMs
-      ).toISOString(),
-      error_message:
-        typeof data === "string"
-          ? data
-          : JSON.stringify(data)
-    })
-    .eq("id", claimed.id);
-}
-
+          await supabase
+            .from("message_jobs")
+            .update({
+              status: "pending",
+              locked_at: null,
+              retry_count: currentRetry,
+              next_retry_at: new Date(Date.now() + retryDelayMs).toISOString(),
+              error_message:
+                typeof data === "string"
+                  ? data
+                  : JSON.stringify(data)
+            })
+            .eq("id", claimed.id);
+        }
       }
     }
   } catch (err) {
     console.error("processMessageJobs error:", err);
     await logSystemError("processMessageJobs", err);
-
   } finally {
     messageWorkerRunning = false;
   }
@@ -1571,33 +1564,40 @@ if (
       }
 
       try {
+        const latestOrder = await getOrderByCode(orderCode);
+
+        if (!latestOrder || latestOrder.status === "canceled") {
+          decidingOrders.delete(order.order_id);
+          return;
+        }
+
         const result = await decideWinner(order.order_id);
 
         if (!result) return;
 
         const {
-  order: assignedOrder,
-  winner,
-  losers
-} = result;
+          order: assignedOrder,
+          winner,
+          losers
+        } = result;
+
         const winnerSource = assignedOrder.source_name || orderSource || "A";
 
+        for (const loser of losers) {
+          await queueGroupMention(
+            loser.driver_line_id,
+            "X",
+            assignedOrder.order_id,
+            PRIORITY_COUNTDOWN_SPRAY
+          );
+        }
 
-for (const loser of losers) {
-  await queueGroupMention(
-    loser.driver_line_id,
-    "X",
-    assignedOrder.order_id,
-    PRIORITY_COUNTDOWN_SPRAY
-  );
-}
-
-await queueGroupMention(
-  winner.driver_line_id,
-  "噴",
-  assignedOrder.order_id,
-  PRIORITY_COUNTDOWN_SPRAY
-);
+        await queueGroupMention(
+          winner.driver_line_id,
+          "噴",
+          assignedOrder.order_id,
+          PRIORITY_COUNTDOWN_SPRAY
+        );
 
         await markSprayConfirmed(assignedOrder.order_id);
 
@@ -1665,7 +1665,7 @@ async function repairStuckDecisions() {
     const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
-      .eq("status", "waiting")
+      .in("status", ["waiting", "assigned"])
       .eq("decision_started", true)
       .lt("updated_at", stuckBefore)
       .limit(10);
@@ -1755,6 +1755,7 @@ async function refreshOpenOrders() {
     );
 
     for (const order of refreshTargets) {
+      if (order.status === "canceled") continue;
       if (refreshingOrders.has(order.order_id)) continue;
 
       refreshingOrders.add(order.order_id);
