@@ -50,7 +50,7 @@ const OVERRIDE_DIFF_MINUTES = 7;
 
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 30;
-const REFRESH_ORDER_DELAY_MS = 4000; // 每張刷單間隔3秒，降低429
+const REFRESH_ORDER_DELAY_MS = 4000; // 每張刷單間隔4秒，降低429
 const MESSAGE_WORKER_INTERVAL_MS = 1200;
 const MESSAGE_JOB_BATCH_SIZE = 20;
 const MAX_RETRY = 5;
@@ -380,16 +380,39 @@ async function markCustomerDispatchNotified(orderId) {
 }
 
 async function pushCustomerDispatch(customerLineId, plate, minutes, source = "A") {
+  let messageText = "";
+
+  if (minutes === "準") {
+    messageText =
+`司機已出發
+車牌:${plate}
+準時抵達`;
+  }
+  else if (
+    typeof minutes === "string" &&
+    minutes.startsWith("晚")
+  ) {
+    const lateMinutes = minutes.replace("晚", "");
+
+    messageText =
+`司機已出發
+車牌:${plate}
+預計晚${lateMinutes}分鐘抵達`;
+  }
+  else {
+    messageText =
+`司機已出發
+車牌:${plate}
+約${minutes}分鐘抵達`;
+  }
+
   return enqueueMessage({
     toId: customerLineId,
     sourceName: source,
     priority: PRIORITY_CUSTOMER,
     message: {
       type: "text",
-      text:
-  minutes === "準"
-    ? `司機已出發\n車牌:${plate}\n會準時抵達`
-    : `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
+      text: messageText
     }
   });
 }
