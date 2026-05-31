@@ -257,7 +257,8 @@ async function getOpenOrdersForRefresh() {
     .from("orders")
     .select("*")
     .eq("status", "waiting")
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .limit(50);
 
   if (error) throw error;
   return data || [];

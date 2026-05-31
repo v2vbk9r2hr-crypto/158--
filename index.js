@@ -49,9 +49,12 @@ const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 
 const REFRESH_INTERVAL_MS = 60000;
-const REFRESH_BATCH_SIZE = 1;
+const REFRESH_BATCH_SIZE = 30;
+const REFRESH_ORDER_DELAY_MS = 3000; // 每張刷單間隔3秒，降低429
 const MESSAGE_WORKER_INTERVAL_MS = 2500;
 const MAX_RETRY = 5;
+const RESPRAY_CHECK_INTERVAL_MS = 30 * 1000;
+const BOT_FAIL_HOLD_MS = 5 * 60 * 1000; // Bot壞掉時，訊息保留5分鐘後再試
 
 const PRIORITY_OVERRIDE_SPRAY = 2;
 const PRIORITY_CUSTOMER = 3;
@@ -355,6 +358,15 @@ async function queueGroupMention(userId, text, orderId = null, priority = PRIORI
   });
 }
 
+async function markSprayConfirmed(orderId) {
+  if (!orderId) return;
+
+  await supabase
+    .from("orders")
+    .update({ spray_confirmed: true })
+    .eq("order_id", orderId);
+}
+
 async function pushCustomerDispatch(customerLineId, plate, minutes, source = "A") {
   return enqueueMessage({
     toId: customerLineId,
@@ -362,7 +374,10 @@ async function pushCustomerDispatch(customerLineId, plate, minutes, source = "A"
     priority: PRIORITY_CUSTOMER,
     message: {
       type: "text",
-      text: `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
+      text:
+  minutes === "準"
+    ? `司機已出發\n車牌:${plate}\n會準時抵達`
+    : `司機已出發\n車牌:${plate}\n約${minutes}分鐘`
     }
   });
 }
@@ -544,13 +559,16 @@ async function processMessageJobs() {
 
     if (claimed) {
       const currentRetry = Number(claimed.retry_count || 0) + 1;
-      const retryDelayMs = status === 429 ? 60000 : 15000;
+      const retryDelayMs =
+  status === 429
+    ? 60000
+    : BOT_FAIL_HOLD_MS;
       const nextRetryAt = new Date(Date.now() + retryDelayMs).toISOString();
 
       await supabase
         .from("message_jobs")
         .update({
-          status: currentRetry >= MAX_RETRY ? "failed" : "pending",
+          status: "pending",
           locked_at: null,
           retry_count: currentRetry,
           next_retry_at: nextRetryAt,
@@ -1207,13 +1225,13 @@ if (
     });
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
-
+    await markSprayConfirmed(updatedOrder.order_id);
     await pushCustomerDispatch(
-      updatedOrder.customer_line_id,
-      plate,
-      "準",
-      orderSource
-    );
+  updatedOrder.customer_line_id,
+  plate,
+  "準",
+  orderSource
+);
 
     totalAssigned++;
     return;
@@ -1223,11 +1241,20 @@ if (
   if (parsed.type === "reservation_late") {
     const normalizedText = chineseNumberToDigit(parsed.reservationText);
     const lateMatch = normalizedText.match(/^(晚|慢)(\d+)$/);
-    const lateMinutes = lateMatch ? Number(lateMatch[2]) : null;
+const lateMinutes = lateMatch ? Number(lateMatch[2]) : null;
 
-    if (lateMinutes !== 5) {
-      return replyMention(clientObj, event.replyToken, event.source.userId, "X");
-    }
+if (
+  !Number.isFinite(lateMinutes) ||
+  lateMinutes < 1 ||
+  lateMinutes > 10
+) {
+  return replyMention(
+    clientObj,
+    event.replyToken,
+    event.source.userId,
+    "X"
+  );
+}
 
     const existingReady = reservationReadyWinners.get(key);
     if (existingReady) {
@@ -1261,13 +1288,13 @@ if (
           order,
           driverLineId: stillPending.driverLineId,
           plate: stillPending.plate,
-          minutes: 5
+          minutes: lateMinutes
         });
 
-       await lockReservationWinner(
+      await lockReservationWinner(
   order.order_id,
   stillPending.driverLineId,
-  "late5"
+  `late${lateMinutes}`
 );
 
         await rememberDriverOrder({
@@ -1278,17 +1305,19 @@ if (
           plate: stillPending.plate
         });
 
-        await queueGroupMention(
-          stillPending.driverLineId,
-          "噴",
-          order.order_id,
-          PRIORITY_COUNTDOWN_SPRAY
-        );
+       await queueGroupMention(
+  stillPending.driverLineId,
+  "噴",
+  order.order_id,
+  PRIORITY_COUNTDOWN_SPRAY
+);
+await markSprayConfirmed(updatedOrder.order_id);
+
 
         await pushCustomerDispatch(
           updatedOrder.customer_line_id,
           stillPending.plate,
-          "晚5",
+          `晚${lateMinutes}`,
           orderSource
         );
 
@@ -1303,6 +1332,15 @@ if (
     return;
   }
 } 
+
+if (isReservationOrder && parsed.type === "report") {
+  return replyMention(
+    clientObj,
+    event.replyToken,
+    event.source.userId,
+    "X"
+  );
+}
 
   if (Number.isFinite(minutes) && minutes <= 5) {
     try {
@@ -1337,6 +1375,7 @@ if (
     });
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+    await markSprayConfirmed(updatedOrder.order_id);
 
     await pushCustomerDispatch(
       updatedOrder.customer_line_id,
@@ -1396,6 +1435,7 @@ if (
       });
 
       await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+      await markSprayConfirmed(updatedOrder.order_id);
 
       await queueGroupMention(
         oldDriverId,
@@ -1450,6 +1490,8 @@ if (
           PRIORITY_COUNTDOWN_SPRAY
         );
 
+        await markSprayConfirmed(assignedOrder.order_id);
+
         await pushCustomerDispatch(
           assignedOrder.customer_line_id,
           winner.plate,
@@ -1465,6 +1507,40 @@ if (
         decidingOrders.delete(order.order_id);
       }
     }, 8000);
+  }
+}
+
+async function repairMissingSprayJobs() {
+  try {
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("status", "assigned")
+      .not("assigned_driver_line_id", "is", null)
+      .is("spray_confirmed", null)
+      .gte("created_at", new Date(Date.now() - 2 * 60 * 1000).toISOString())
+      .limit(10);
+
+    if (error) throw error;
+    if (!orders || orders.length === 0) return;
+
+    for (const order of orders) {
+      await queueGroupMention(
+        order.assigned_driver_line_id,
+        "噴",
+        order.order_id,
+        PRIORITY_COUNTDOWN_SPRAY
+      );
+
+      await supabase
+        .from("orders")
+        .update({ spray_confirmed: true })
+        .eq("order_id", order.order_id);
+    }
+
+  } catch (err) {
+    console.error("repairMissingSprayJobs error:", err);
+    await logSystemError("repairMissingSprayJobs", err);
   }
 }
 
@@ -1502,7 +1578,7 @@ async function refreshOpenOrders() {
       await markOrderRefreshed(order.order_id);
       refreshingOrders.delete(order.order_id);
 
-      await delay(1000);
+      await delay(REFRESH_ORDER_DELAY_MS);
     }
   } catch (err) {
     refreshingOrders.clear();
@@ -1783,6 +1859,7 @@ app.post("/admin/action", async (req, res) => {
 
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
+setInterval(repairMissingSprayJobs, RESPRAY_CHECK_INTERVAL_MS);
 
 setInterval(() => {
   console.log(`429:${total429}\nGoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`);
