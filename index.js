@@ -436,6 +436,7 @@ async function pushAskDriverReservationChange(order, reservationTime, paymentTex
 }
 
 async function processMessageJobs() {
+  if (!BOT_ENABLED) return;
   if (messageWorkerRunning) return;
   messageWorkerRunning = true;
   let claimed = null;
@@ -740,9 +741,17 @@ async function handleBotControl(event, text, clientObj) {
 
   if (text === "停止機器人運作" || text === "停止") {
     BOT_ENABLED = false;
-    await setBotSetting("bot_enabled", "false");
-    await replyText(clientObj, event.replyToken, "機器人已停止運作");
-    return true;
+await setBotSetting("bot_enabled", "false");
+
+await supabase
+  .from("message_jobs")
+  .update({
+    next_retry_at: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  })
+  .eq("status", "pending");
+
+await replyText(clientObj, event.replyToken, "機器人已停止運作");
+return true;
   }
 
   if (text === "開始機器人運作" || text === "開始") {
@@ -1544,6 +1553,7 @@ if (isReservationOrder && parsed.type === "report") {
 
 async function repairMissingSprayJobs() {
   try {
+    if (!BOT_ENABLED) return;
     const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
