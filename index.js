@@ -51,7 +51,8 @@ const OVERRIDE_DIFF_MINUTES = 7;
 const REFRESH_INTERVAL_MS = 60000;
 const REFRESH_BATCH_SIZE = 30;
 const REFRESH_ORDER_DELAY_MS = 3000; // 每張刷單間隔3秒，降低429
-const MESSAGE_WORKER_INTERVAL_MS = 2500;
+const MESSAGE_WORKER_INTERVAL_MS = 800;
+const MESSAGE_JOB_BATCH_SIZE = 20;
 const MAX_RETRY = 5;
 const RESPRAY_CHECK_INTERVAL_MS = 30 * 1000;
 const REPAIR_DECISION_INTERVAL_MS = 30 * 1000;
@@ -448,27 +449,26 @@ async function pushAskDriverReservationChange(order, reservationTime, paymentTex
 }
 
 async function processMessageJobs() {
+
   if (!BOT_ENABLED) return;
   if (messageWorkerRunning) return;
+
   messageWorkerRunning = true;
-  let claimed = null;
-  let lastErrorStatus = null;
-  let lastErrorData = null;
 
   try {
     const now = new Date().toISOString();
     const staleTime = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
     await supabase
-  .from("message_jobs")
-  .update({
-    status: "pending",
-    locked_at: null,
-    next_retry_at: new Date().toISOString(),
-    error_message: "recovered from stuck processing"
-  })
-  .eq("status", "processing")
-  .lt("locked_at", staleTime);
+      .from("message_jobs")
+      .update({
+        status: "pending",
+        locked_at: null,
+        next_retry_at: new Date().toISOString(),
+        error_message: "recovered from stuck processing"
+      })
+      .eq("status", "processing")
+      .lt("locked_at", staleTime);
 
     const { data: jobs, error } = await supabase
       .from("message_jobs")
@@ -477,146 +477,182 @@ async function processMessageJobs() {
       .or(`next_retry_at.is.null,next_retry_at.lte.${now}`)
       .order("priority", { ascending: true })
       .order("created_at", { ascending: true })
-      .limit(1);
+      .limit(MESSAGE_JOB_BATCH_SIZE);
 
     if (error) throw error;
     if (!jobs || jobs.length === 0) return;
 
-    const job = jobs[0];
+    for (const job of jobs) {
+      let claimed = null;
+      let lastErrorStatus = null;
+      let lastErrorData = null;
 
-    const { data, error: claimError } = await supabase
-      .from("message_jobs")
-      .update({
-        status: "processing",
-        locked_at: new Date().toISOString()
-      })
-      .eq("id", job.id)
-      .eq("status", "pending")
-      .select("*")
-      .maybeSingle();
-
-    if (claimError) throw claimError;
-    if (!data) return;
-
-    claimed = data;
-
-    const { data: bots, error: botError } = await supabase
-     .from("bot_accounts")
-     .select("*")
-     .eq("status", "active")
-     .eq("source_name", claimed.source_name)
-      .order("last_used_at", { ascending: true, nullsFirst: true })
-.order("id", { ascending: true })
-.limit(10);
-
-    if (botError) throw botError;
-    if (!bots || bots.length === 0) {
-      throw new Error("沒有可用的 active bot_accounts");
-    }
-
-    let sent = false;
-
-    for (const bot of bots) {
       try {
-        const tempClient = new line.Client({
-  channelAccessToken: bot.channel_access_token
-});
-
-        await tempClient.pushMessage(claimed.to_id, claimed.message_json);
-
-        await supabase
+        const { data, error: claimError } = await supabase
           .from("message_jobs")
           .update({
-            status: "sent",
-            sent_at: new Date().toISOString(),
-            locked_at: null,
-            error_message: null,
+            status: "processing",
+            locked_at: new Date().toISOString()
           })
-          .eq("id", claimed.id);
+          .eq("id", job.id)
+          .eq("status", "pending")
+          .select("*")
+          .maybeSingle();
 
-        await supabase
+        if (claimError) throw claimError;
+        if (!data) continue;
+
+        claimed = data;
+
+        const { data: bots, error: botError } = await supabase
           .from("bot_accounts")
-          .update({
-            last_used_at: new Date().toISOString(),
-            last_error: null,
-            fail_count: 0
-          })
-          .eq("id", bot.id);
+          .select("*")
+          .eq("status", "active")
+          .eq("source_name", claimed.source_name)
+          .order("last_used_at", { ascending: true, nullsFirst: true })
+          .order("id", { ascending: true })
+          .limit(10);
 
-        sent = true;
-        break;
-      } catch (err) {
-        const status = getErrorStatus(err);
-        const data = getErrorData(err);
-
-        lastErrorStatus = status;
-        lastErrorData = data;
-
-        const newFailCount = Number(bot.fail_count || 0) + 1;
-
-const updateData = {
-  fail_count: newFailCount,
-  last_error: typeof data === "string" ? data : JSON.stringify(data)
-};
-
-if (newFailCount >= 10) {
-  updateData.status = "disabled";
-  updateData.disabled_at = new Date().toISOString();
-}
-
-await supabase
-  .from("bot_accounts")
-  .update(updateData)
-  .eq("id", bot.id);
-
-        if (status === 429) {
-          total429++;
-          continue;
+        if (botError) throw botError;
+        if (!bots || bots.length === 0) {
+          throw new Error("沒有可用的 active bot_accounts");
         }
 
-        continue;
+        let sent = false;
+
+        for (const bot of bots) {
+          try {
+            const tempClient = new line.Client({
+              channelAccessToken: bot.channel_access_token
+            });
+
+            await tempClient.pushMessage(claimed.to_id, claimed.message_json);
+
+            await supabase
+              .from("message_jobs")
+              .update({
+                status: "sent",
+                sent_at: new Date().toISOString(),
+                locked_at: null,
+                error_message: null
+              })
+              .eq("id", claimed.id);
+
+            await supabase
+              .from("bot_accounts")
+              .update({
+                last_used_at: new Date().toISOString(),
+                last_error: null,
+                fail_count: 0
+              })
+              .eq("id", bot.id);
+
+            sent = true;
+            break;
+          } catch (err) {
+            const status = getErrorStatus(err);
+            const data = getErrorData(err);
+
+            lastErrorStatus = status;
+            lastErrorData = data;
+
+            const newFailCount = Number(bot.fail_count || 0) + 1;
+
+            const updateData = {
+              fail_count: newFailCount,
+              last_error: typeof data === "string" ? data : JSON.stringify(data)
+            };
+
+            if (newFailCount >= 10) {
+              updateData.status = "disabled";
+              updateData.disabled_at = new Date().toISOString();
+            }
+
+            await supabase
+              .from("bot_accounts")
+              .update(updateData)
+              .eq("id", bot.id);
+
+            if (status === 429) total429++;
+
+            continue;
+          }
+        }
+
+        if (!sent) {
+          throw {
+            statusCode: lastErrorStatus,
+            message: lastErrorData || "所有 BOT 發送失敗"
+          };
+        }
+
+        await delay(50);
+      } catch (err) {
+        const status = err?.statusCode || getErrorStatus(err);
+        const data = err?.message || getErrorData(err);
+
+        console.error("processMessageJobs item error:", data);
+        await logSystemError("processMessageJobs:item", data);
+
+        if (status === 429) total429++;
+
+        if (claimed) {
+
+  const currentRetry =
+    Number(claimed.retry_count || 0) + 1;
+
+  const retryDelayMs =
+    status === 429
+      ? 60000
+      : BOT_FAIL_HOLD_MS;
+
+  if (currentRetry >= MAX_RETRY) {
+
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "failed",
+        locked_at: null,
+        retry_count: currentRetry,
+        error_message:
+          typeof data === "string"
+            ? data
+            : JSON.stringify(data)
+      })
+      .eq("id", claimed.id);
+
+    continue;
+  }
+
+  await supabase
+    .from("message_jobs")
+    .update({
+      status: "pending",
+      locked_at: null,
+      retry_count: currentRetry,
+      next_retry_at: new Date(
+        Date.now() + retryDelayMs
+      ).toISOString(),
+      error_message:
+        typeof data === "string"
+          ? data
+          : JSON.stringify(data)
+    })
+    .eq("id", claimed.id);
+}
+
+        }
       }
     }
-
-    if (!sent) {
-      throw {
-        statusCode: lastErrorStatus,
-        message: lastErrorData || "所有 BOT 發送失敗"
-      };
-    }
   } catch (err) {
-    const status = err?.statusCode || getErrorStatus(err);
-    const data = err?.message || getErrorData(err);
+    console.error("processMessageJobs error:", err);
+    await logSystemError("processMessageJobs", err);
 
-    console.error("processMessageJobs error:", data);
-    await logSystemError("processMessageJobs", data);
-
-    if (status === 429) total429++;
-
-    if (claimed) {
-      const currentRetry = Number(claimed.retry_count || 0) + 1;
-      const retryDelayMs =
-  status === 429
-    ? 60000
-    : BOT_FAIL_HOLD_MS;
-      const nextRetryAt = new Date(Date.now() + retryDelayMs).toISOString();
-
-      await supabase
-        .from("message_jobs")
-        .update({
-          status: "pending",
-          locked_at: null,
-          retry_count: currentRetry,
-          next_retry_at: nextRetryAt,
-          error_message: typeof data === "string" ? data : JSON.stringify(data)
-        })
-        .eq("id", claimed.id);
-    }
   } finally {
     messageWorkerRunning = false;
   }
-}
-
+  }
+  
 function checkCustomerCooldown(customerLineId) {
   const last = customerCooldown.get(customerLineId);
   if (last && Date.now() - last < 5000) return false;
@@ -1656,7 +1692,8 @@ async function repairStuckDecisions() {
   winner,
   losers
 } = result;
-        const winnerSource = assignedOrder.source_name || order.source_name || "A";;
+        const winnerSource =
+  assignedOrder.source_name || order.source_name || "A";
 
 for (const loser of losers) {
   await queueGroupMention(
