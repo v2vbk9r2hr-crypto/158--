@@ -448,14 +448,15 @@ async function processMessageJobs() {
     const staleTime = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
     await supabase
-      .from("message_jobs")
-      .update({
-        status: "pending",
-        locked_at: null,
-        error_message: "recovered from stuck processing"
-      })
-      .eq("status", "processing")
-      .lt("locked_at", staleTime);
+  .from("message_jobs")
+  .update({
+    status: "pending",
+    locked_at: null,
+    next_retry_at: new Date().toISOString(),
+    error_message: "recovered from stuck processing"
+  })
+  .eq("status", "processing")
+  .lt("locked_at", staleTime);
 
     const { data: jobs, error } = await supabase
       .from("message_jobs")
