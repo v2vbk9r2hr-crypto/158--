@@ -641,7 +641,6 @@ async function processMessageJobs() {
     .eq("id", claimed.id);
 }
 
-        }
       }
     }
   } catch (err) {
@@ -651,8 +650,8 @@ async function processMessageJobs() {
   } finally {
     messageWorkerRunning = false;
   }
-  }
-  
+}
+
 function checkCustomerCooldown(customerLineId) {
   const last = customerCooldown.get(customerLineId);
   if (last && Date.now() - last < 5000) return false;
