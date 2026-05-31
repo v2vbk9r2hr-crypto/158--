@@ -518,7 +518,6 @@ async function processMessageJobs() {
             sent_at: new Date().toISOString(),
             locked_at: null,
             error_message: null,
-            bot_id: bot.id
           })
           .eq("id", claimed.id);
 
