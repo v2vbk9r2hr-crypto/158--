@@ -49,10 +49,10 @@ const COMPETE_DIFF_MINUTES = 3;
 const OVERRIDE_DIFF_MINUTES = 7;
 
 const REFRESH_INTERVAL_MS = 60000;
-const REFRESH_BATCH_SIZE = 30;
-const REFRESH_ORDER_DELAY_MS = 4000; // 每張刷單間隔4秒，降低429
+const REFRESH_BATCH_SIZE = 5;
+const REFRESH_ORDER_DELAY_MS = 8000; // 每張刷單間隔8秒，降低429
 const MESSAGE_WORKER_INTERVAL_MS = 1200;
-const MESSAGE_JOB_BATCH_SIZE = 20;
+const MESSAGE_JOB_BATCH_SIZE = 5;
 const MAX_RETRY = 5;
 const RESPRAY_CHECK_INTERVAL_MS = 30 * 1000;
 const REPAIR_DECISION_INTERVAL_MS = 30 * 1000;
@@ -609,7 +609,7 @@ async function processMessageJobs() {
           };
         }
 
-        await delay(50);
+        await delay(1200);
       } catch (err) {
         const status = err?.statusCode || getErrorStatus(err);
         const data = err?.message || getErrorData(err);
