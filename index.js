@@ -1624,12 +1624,15 @@ if (
 async function repairMissingSprayJobs() {
   try {
     if (!BOT_ENABLED) return;
+
     const { data: orders, error } = await supabase
       .from("orders")
       .select("*")
       .eq("status", "assigned")
       .not("assigned_driver_line_id", "is", null)
-      .is("spray_confirmed", null)
+      .not("assigned_plate", "is", null)
+      .not("assigned_minutes", "is", null)
+      .or("spray_confirmed.is.null,spray_confirmed.eq.false")
       .gte("created_at", new Date(Date.now() - 2 * 60 * 1000).toISOString())
       .limit(10);
 
@@ -1644,96 +1647,11 @@ async function repairMissingSprayJobs() {
         PRIORITY_COUNTDOWN_SPRAY
       );
 
-      await supabase
-        .from("orders")
-        .update({ spray_confirmed: true })
-        .eq("order_id", order.order_id);
+      await markSprayConfirmed(order.order_id);
     }
-
   } catch (err) {
     console.error("repairMissingSprayJobs error:", err);
     await logSystemError("repairMissingSprayJobs", err);
-  }
-}
-
-async function repairStuckDecisions() {
-  try {
-    if (!BOT_ENABLED) return;
-
-    const stuckBefore = new Date(Date.now() - DECISION_STUCK_MS).toISOString();
-
-    const { data: orders, error } = await supabase
-      .from("orders")
-      .select("*")
-      .in("status", ["waiting", "assigned"])
-      .eq("decision_started", true)
-      .lt("updated_at", stuckBefore)
-      .limit(10);
-
-    if (error) throw error;
-    if (!orders || orders.length === 0) return;
-
-    for (const order of orders) {
-      if (decidingOrders.has(order.order_id)) continue;
-
-      decidingOrders.add(order.order_id);
-
-      try {
-        const result = await decideWinner(order.order_id);
-
-        if (!result) {
-          decidingOrders.delete(order.order_id);
-          continue;
-        }
-
-        const {
-  order: assignedOrder,
-  winner,
-  losers
-} = result;
-        const winnerSource =
-  assignedOrder.source_name || order.source_name || "A";
-
-for (const loser of losers) {
-  await queueGroupMention(
-    loser.driver_line_id,
-    "X",
-    assignedOrder.order_id,
-    PRIORITY_COUNTDOWN_SPRAY
-  );
-}
-
-        await queueGroupMention(
-          winner.driver_line_id,
-          "噴",
-          assignedOrder.order_id,
-          PRIORITY_COUNTDOWN_SPRAY
-        );
-
-        await markSprayConfirmed(assignedOrder.order_id);
-
-        if (!assignedOrder.customer_dispatch_notified) {
-  await pushCustomerDispatch(
-    assignedOrder.customer_line_id,
-    winner.plate,
-    winner.minutes,
-    winnerSource
-  );
-
-  await markCustomerDispatchNotified(assignedOrder.order_id);
-}
-
-        totalAssigned++;
-      } catch (err) {
-        console.error("repairStuckDecisions item error:", err);
-        await logSystemError("repairStuckDecisions:item", err);
-      } finally {
-        decidingOrders.delete(order.order_id);
-      }
-    }
-  } catch (err) {
-    console.error("repairStuckDecisions error:", err);
-    await logSystemError("repairStuckDecisions", err);
   }
 }
 
@@ -2054,7 +1972,6 @@ app.post("/admin/action", async (req, res) => {
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 setInterval(repairMissingSprayJobs, RESPRAY_CHECK_INTERVAL_MS);
-setInterval(repairStuckDecisions, REPAIR_DECISION_INTERVAL_MS);
 
 setInterval(() => {
   console.log(`429:${total429}\nGoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`);
