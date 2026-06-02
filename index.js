@@ -1678,6 +1678,78 @@ async function repairMissingSprayJobs() {
   }
 }
 
+const AUTO_REPAIR_INTERVAL_MS = 30 * 1000;
+const BOT_AUTO_RECOVER_MS = 5 * 60 * 1000;
+let systemSlowMode = false;
+
+async function autoRepairSystem() {
+  try {
+    const now = new Date();
+
+    // 1. processing 卡住拉回 pending
+    const staleTime = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "pending",
+        locked_at: null,
+        next_retry_at: now.toISOString(),
+        error_message: "auto repaired stuck processing"
+      })
+      .eq("status", "processing")
+      .lt("locked_at", staleTime);
+
+    // 2. failed 訊息自動補送一次
+    await supabase
+      .from("message_jobs")
+      .update({
+        status: "pending",
+        locked_at: null,
+        next_retry_at: now.toISOString(),
+        error_message: "auto retry failed job"
+      })
+      .eq("status", "failed")
+      .lt("retry_count", MAX_RETRY);
+
+    // 3. 429 太多，自動暫停刷單，只保留重要訊息
+    if (total429 >= 3 && !systemSlowMode) {
+      systemSlowMode = true;
+      REFRESH_ENABLED = false;
+      await setBotSetting("refresh_enabled", "false");
+      await logSystemError("autoRepairSystem", "429 detected, refresh paused");
+    }
+
+    // 4. 429 冷卻後，自動恢復刷單
+    if (systemSlowMode && total429 === 0) {
+      systemSlowMode = false;
+      REFRESH_ENABLED = true;
+      await setBotSetting("refresh_enabled", "true");
+      await logSystemError("autoRepairSystem", "429 recovered, refresh resumed");
+    }
+
+    // 5. disabled BOT 5分鐘後自動復活
+    await supabase
+      .from("bot_accounts")
+      .update({
+        status: "active",
+        fail_count: 0,
+        last_error: null
+      })
+      .eq("status", "disabled")
+      .lt("disabled_at", new Date(Date.now() - BOT_AUTO_RECOVER_MS).toISOString());
+
+    // 6. 每次修復週期慢慢降低 429 計數，避免永久卡慢模式
+    if (total429 > 0) {
+      total429 = Math.max(0, total429 - 1);
+    }
+
+  } catch (err) {
+    console.error("autoRepairSystem error:", err);
+    await logSystemError("autoRepairSystem", err);
+  }
+}
+
 async function refreshOpenOrders() {
   if (!BOT_ENABLED) return;
   if (!REFRESH_ENABLED) return;
@@ -1995,6 +2067,7 @@ app.post("/admin/action", async (req, res) => {
 setInterval(processMessageJobs, MESSAGE_WORKER_INTERVAL_MS);
 setInterval(refreshOpenOrders, REFRESH_INTERVAL_MS);
 setInterval(repairMissingSprayJobs, RESPRAY_CHECK_INTERVAL_MS);
+setInterval(autoRepairSystem, AUTO_REPAIR_INTERVAL_MS);
 
 setInterval(() => {
   console.log(`429:${total429}\nGoogleAPI:${GOOGLE_API_ENABLED ? "ON" : "OFF"}`);
