@@ -1,4 +1,5 @@
-const { supabase } = require("./supabaseClient");
+let supabaseModule = require("./config/supabase");
+const supabase = supabaseModule.supabase || supabaseModule;
 
 function extractOrderCode(text) {
   const match = text.match(/#?[A-Z]\d{1,3}/i);
