@@ -23,6 +23,17 @@ function looksClosed(text) {
 }
 
 async function handleDriverAssistant(event) {
+
+    console.log("===== DRIVER ASSISTANT =====");
+
+console.log("GROUP:",
+  event?.source?.groupId
+);
+
+console.log("TEXT:",
+  event?.message?.text
+);
+
   try {
     if (!event || event.type !== "message") return;
     if (!event.message || event.message.type !== "text") return;
