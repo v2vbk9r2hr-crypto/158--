@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const line = require("@line/bot-sdk");
+const { handleDriverAssistant } = require("./driverAssistant");
 
 let supabaseModule = require("./config/supabase");
 const supabase = supabaseModule.supabase || supabaseModule;
@@ -912,6 +913,10 @@ async function replyMention(clientObj, replyToken, userId, text) {
 
 async function handleEvent(event, clientObj, source) {
   console.log("EVENT:", source, event.type, JSON.stringify(event.source));
+
+  handleDriverAssistant(event).catch(err => {
+    console.error("driverAssistant async error:", err);
+  });
 
   if (event.type === "join") {
   console.log("JOIN GROUP:", source, event.source.groupId);

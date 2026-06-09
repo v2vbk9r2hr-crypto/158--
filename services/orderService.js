@@ -265,6 +265,7 @@ async function getOpenOrdersForRefresh() {
     .from("orders")
     .select("*")
     .eq("status", "waiting")
+    .order("last_refreshed_at", { ascending: true, nullsFirst: true })
     .order("created_at", { ascending: true })
     .limit(50);
 
@@ -273,22 +274,12 @@ async function getOpenOrdersForRefresh() {
 }
 
 async function markOrderRefreshed(orderId) {
-  return true;
-}
-
-async function cancelLatestCustomerOrder(customerLineId) {
-  const order = await getLatestCustomerOrder(customerLineId);
-  if (!order) return null;
-
-  await supabase
-    .from("driver_reports")
-    .delete()
-    .eq("order_id", order.order_id);
-
   const { data, error } = await supabase
     .from("orders")
-    .update({ status: "canceled" })
-    .eq("order_id", order.order_id)
+    .update({
+      last_refreshed_at: new Date().toISOString()
+    })
+    .eq("order_id", orderId)
     .select()
     .single();
 
