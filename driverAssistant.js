@@ -94,6 +94,34 @@ console.log("TEXT:",
   }
 }
 
+async function cancelLatestCustomerOrder(customerLineId) {
+  const { data, error } = await supabase
+    .from("orders")
+    .select("*")
+    .eq("customer_line_id", customerLineId)
+    .in("status", ["open", "assigned"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  const { data: updated, error: updateError } = await supabase
+    .from("orders")
+    .update({
+      status: "canceled",
+      canceled_at: new Date().toISOString()
+    })
+    .eq("order_id", data.order_id)
+    .select("*")
+    .maybeSingle();
+
+  if (updateError) throw updateError;
+
+  return updated;
+}
+
 module.exports = {
   handleDriverAssistant
 };
