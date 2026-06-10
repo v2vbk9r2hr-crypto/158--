@@ -97,3 +97,5 @@ console.log("TEXT:",
 module.exports = {
   handleDriverAssistant
 };
+
+// startGpsWatch();
