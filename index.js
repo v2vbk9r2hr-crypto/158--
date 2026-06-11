@@ -362,6 +362,31 @@ async function queueGroupMention(userId, text, orderId = null, priority = PRIORI
   });
 }
 
+function cleanAssistantOrderCode(orderCode) {
+  return String(orderCode || "")
+    .replace("#", "")
+    .replaceAll("/", "")
+    .trim()
+    .toUpperCase();
+}
+
+async function closeDriverAssistantOrder(orderCode) {
+  const cleanCode = cleanAssistantOrderCode(orderCode);
+
+  if (!cleanCode) return;
+
+  await supabase
+    .from("driver_assistant_orders")
+    .update({
+      status: "closed",
+      closed_reason: "噴",
+      closed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .eq("group_id", DRIVER_GROUP_ID)
+    .eq("order_code", cleanCode);
+}
+
 async function markSprayConfirmed(orderId) {
   if (!orderId) return;
 
@@ -1349,28 +1374,7 @@ if (
     });
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
-    await supabase
-  .from("driver_assistant_orders")
-  .update({
-    status: "closed",
-    closed_reason: "噴",
-    closed_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
-  })
-  .eq("group_id", DRIVER_GROUP_ID)
-  .eq("order_code", orderCode.replace("#", "").replace("/", ""));
-
-await supabase
-  .from("driver_assistant_orders")
-  .update({
-    status: "closed",
-    closed_reason: "噴",
-    closed_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
-  })
-  .eq("group_id", DRIVER_GROUP_ID)
-  .eq("order_code", orderCode.replace("#", "").replace("/", ""));
-
+    await closeDriverAssistantOrder(orderCode);
     await markSprayConfirmed(updatedOrder.order_id);
     await pushCustomerDispatch(
   updatedOrder.customer_line_id,
@@ -1459,6 +1463,7 @@ if (
   order.order_id,
   PRIORITY_COUNTDOWN_SPRAY
 );
+await closeDriverAssistantOrder(orderCode);
 await markSprayConfirmed(updatedOrder.order_id);
 
 
@@ -1532,6 +1537,7 @@ if (
     });
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+    await closeDriverAssistantOrder(orderCode);
     await markSprayConfirmed(updatedOrder.order_id);
 
     await pushCustomerDispatch(
@@ -1607,7 +1613,7 @@ if (
       updatedOrder.order_id,
       PRIORITY_OVERRIDE_SPRAY
     );
-
+    await closeDriverAssistantOrder(orderCode);
     await markSprayConfirmed(updatedOrder.order_id);
 
     await pushCustomerFasterDispatch(
@@ -1671,6 +1677,10 @@ if (
           "噴",
           assignedOrder.order_id,
           PRIORITY_COUNTDOWN_SPRAY
+        );
+
+        await closeDriverAssistantOrder(
+          assignedOrder.order_code
         );
 
         await markSprayConfirmed(assignedOrder.order_id);
