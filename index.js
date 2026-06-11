@@ -1015,37 +1015,15 @@ if (driverServiceText) {
 
   processingOrders.delete(customerLineId);
 
-  const groupText = `${order.order_code} ${order.address}${paymentText}${feeText}`;
-const cleanOrderCode = order.order_code.replace("#", "").replace("/", "");
-
-await Promise.all([
-  supabase
-    .from("driver_assistant_orders")
-    .upsert(
-      {
-        group_id: DRIVER_GROUP_ID,
-        order_code: cleanOrderCode,
-        raw_text: groupText,
-        address: order.address,
-        status: "open",
-        detected_from: "official_order",
-        updated_at: new Date().toISOString()
-      },
-      {
-        onConflict: "group_id,order_code"
-      }
-    ),
-
-  enqueueMessage({
+  await enqueueMessage({
     toId: DRIVER_GROUP_ID,
     sourceName: DRIVER_GROUP_SOURCE,
     priority: PRIORITY_NEW_ORDER,
     message: {
       type: "text",
-      text: groupText
+      text: `${order.order_code}${order.address}`
     }
-  })
-]);
+  });
 
   return;
 }
@@ -1148,7 +1126,8 @@ await Promise.all([
     await logSystemError("handleCustomerOrder", err);
     return replyText(clientObj, event.replyToken, "系統忙碌中");
   }
-}
+  }
+
 
 async function handleCustomerChangeToReservation(event, text, clientObj) {
   const parts = text.split(/\s+/);

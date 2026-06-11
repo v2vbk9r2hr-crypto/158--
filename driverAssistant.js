@@ -45,30 +45,41 @@ console.log("TEXT:",
 
     if (!orderCode) return;
 
-    if (looksLikeOrder(text)) {
-      const { error } = await supabase
-        .from("driver_assistant_orders")
-        .upsert(
-          {
-            group_id: groupId,
-            order_code: orderCode,
-            raw_text: text,
-            address: text,
-            status: "open",
-            detected_from: "line_group",
-            updated_at: new Date().toISOString()
-          },
-          {
-            onConflict: "group_id,order_code"
-          }
-        );
+if (looksLikeOrder(text)) {
+  const { data: existing, error: findError } = await supabase
+    .from("driver_assistant_orders")
+    .select("id, detected_from")
+    .eq("group_id", groupId)
+    .eq("order_code", orderCode)
+    .maybeSingle();
 
-      if (error) {
-        console.error("driverAssistant upsert error:", error);
-      }
+  if (findError) {
+    console.error("driverAssistant find error:", findError);
+    return;
+  }
 
-      return;
-    }
+  if (existing) {
+    return;
+  }
+
+  const { error } = await supabase
+    .from("driver_assistant_orders")
+    .insert({
+      group_id: groupId,
+      order_code: orderCode,
+      raw_text: text,
+      address: text,
+      status: "open",
+      detected_from: "line_group",
+      updated_at: new Date().toISOString()
+    });
+
+  if (error) {
+    console.error("driverAssistant insert error:", error);
+  }
+
+  return;
+}
 
     if (looksClosed(text)) {
       const status = /(取|取消)/.test(text) ? "canceled" : "closed";
