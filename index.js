@@ -1108,17 +1108,40 @@ await Promise.all([
 
     processingOrders.delete(customerLineId);
 
-    await replyText(clientObj, event.replyToken, "立即為您派車");
+    const groupText = `${order.order_code} ${order.address}${paymentText}${feeText}`;
+const cleanOrderCode = order.order_code.replace("#", "").replace("/", "");
 
-    await enqueueMessage({
-      toId: DRIVER_GROUP_ID,
-      sourceName: DRIVER_GROUP_SOURCE,
-      priority: PRIORITY_NEW_ORDER,
-      message: {
-        type: "text",
-        text: `${order.order_code} ${order.address}${paymentText}${feeText}`
+await replyText(clientObj, event.replyToken, "立即為您派車");
+
+await Promise.all([
+  supabase
+    .from("driver_assistant_orders")
+    .upsert(
+      {
+        group_id: DRIVER_GROUP_ID,
+        order_code: cleanOrderCode,
+        raw_text: groupText,
+        address: order.address,
+        status: "open",
+        detected_from: "official_order",
+        updated_at: new Date().toISOString()
+      },
+      {
+        onConflict: "group_id,order_code"
       }
-    });
+    ),
+
+  enqueueMessage({
+    toId: DRIVER_GROUP_ID,
+    sourceName: DRIVER_GROUP_SOURCE,
+    priority: PRIORITY_NEW_ORDER,
+    message: {
+      type: "text",
+      text: groupText
+    }
+  })
+]);
+
   } catch (err) {
     processingOrders.delete(customerLineId);
     console.error("handleCustomerOrder error:", err);
