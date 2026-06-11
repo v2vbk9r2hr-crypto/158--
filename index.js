@@ -402,7 +402,7 @@ async function closeDriverAssistantOrder(orderCode) {
   await supabase
     .from("driver_assistant_orders")
     .update({
-      status: "closed",
+      status: "assigned",
       closed_reason: "噴",
       closed_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
