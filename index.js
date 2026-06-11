@@ -1349,6 +1349,18 @@ if (
     });
 
     await replyMention(clientObj, event.replyToken, event.source.userId, "噴");
+
+await supabase
+  .from("driver_assistant_orders")
+  .update({
+    status: "closed",
+    closed_reason: "噴",
+    closed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  })
+  .eq("group_id", DRIVER_GROUP_ID)
+  .eq("order_code", orderCode.replace("#", "").replace("/", ""));
+
     await markSprayConfirmed(updatedOrder.order_id);
     await pushCustomerDispatch(
   updatedOrder.customer_line_id,
