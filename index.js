@@ -362,6 +362,30 @@ async function queueGroupMention(userId, text, orderId = null, priority = PRIORI
   });
 }
 
+async function geocodeAddress(address) {
+  if (!process.env.GOOGLE_MAPS_API_KEY) return null;
+
+  const url =
+    "https://maps.googleapis.com/maps/api/geocode/json?address=" +
+    encodeURIComponent(address) +
+    "&region=tw&key=" +
+    process.env.GOOGLE_MAPS_API_KEY;
+
+  const response = await fetch(url);
+  const result = await response.json();
+
+  if (
+    result.status !== "OK" ||
+    !result.results ||
+    !result.results[0]
+  ) {
+    console.error("geocode failed:", result.status, address);
+    return null;
+  }
+
+  return result.results[0].geometry.location;
+}
+
 function cleanAssistantOrderCode(orderCode) {
   return String(orderCode || "")
     .replace("#", "")
@@ -1111,7 +1135,8 @@ if (driverServiceText) {
 
     processingOrders.delete(customerLineId);
 
-    const groupText = `${order.order_code} ${order.address}${paymentText}${feeText}`;
+const groupText = `${order.order_code} ${order.address}${paymentText}${feeText}`;
+const pickupLocation = await geocodeAddress(order.address);
 const cleanOrderCode = order.order_code.replace("#", "").replace("/", "");
 
 await replyText(clientObj, event.replyToken, "立即為您派車");
@@ -1125,6 +1150,8 @@ await Promise.all([
         order_code: cleanOrderCode,
         raw_text: groupText,
         address: order.address,
+        pickup_lat: pickupLocation ? pickupLocation.lat : null,
+        pickup_lng: pickupLocation ? pickupLocation.lng : null,
         status: "open",
         detected_from: "official_order",
         updated_at: new Date().toISOString()
